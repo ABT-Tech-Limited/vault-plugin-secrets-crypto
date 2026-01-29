@@ -1,0 +1,57 @@
+# Build artifacts
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Plugin binary and checksum (with version, e.g., vault-plugin-crypto-v0.1.0)
+vault-plugin-crypto.sha256
+vault-plugin-crypto-*
+vault-plugin-crypto-*.sha256
+
+# Go
+*.test
+*.out
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Vault
+*.unseal
+*.root_token
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+.claude
