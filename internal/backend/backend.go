@@ -46,6 +46,7 @@ func newBackend() *CryptoBackend {
 		Paths: framework.PathAppend(
 			pathKeys(b),
 			pathKeysSign(b),
+			pathTxBuild(b),
 		),
 		BackendType:    logical.TypeLogical,
 		Invalidate:     b.invalidate,

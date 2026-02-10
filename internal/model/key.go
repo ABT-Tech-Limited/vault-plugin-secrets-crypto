@@ -82,17 +82,9 @@ func (ki *KeyInfo) ToResponseData() map[string]interface{} {
 		"curve":       string(ki.Curve),
 		"created_at":  ki.CreatedAt.Format(time.RFC3339),
 	}
-	if ki.Name != "" {
-		data["name"] = ki.Name
-	}
-	if ki.ExternalID != "" {
-		data["external_id"] = ki.ExternalID
-	}
-	if ki.PublicKey != "" {
-		data["public_key"] = ki.PublicKey
-	}
-	if ki.Metadata != nil && len(ki.Metadata) > 0 {
-		data["metadata"] = ki.Metadata
-	}
+	data["name"] = ki.Name
+	data["external_id"] = ki.ExternalID
+	data["public_key"] = ki.PublicKey
+	data["metadata"] = ki.Metadata
 	return data
 }

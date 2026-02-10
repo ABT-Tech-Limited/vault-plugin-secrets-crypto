@@ -4,7 +4,7 @@ PLUGIN_DIR := cmd/$(PLUGIN_NAME)
 BUILD_DIR := build
 PLUGIN_BINARY := $(PLUGIN_NAME)-$(VERSION)
 
-.PHONY: all build build-linux clean test fmt lint dev register enable disable build-all deploy-start deploy-stop deploy-logs deploy-status
+.PHONY: all build build-linux clean test fmt lint dev build-all deploy-start deploy-stop deploy-logs deploy-status
 
 all: fmt test build-linux
 
@@ -56,31 +56,43 @@ deps:
 	go mod download
 	go mod tidy
 
-# Start Vault in dev mode with plugin directory
-dev: build
-	@echo "Starting Vault in dev mode..."
-	@echo "Run the following commands in another terminal:"
-	@echo "  export VAULT_ADDR='http://127.0.0.1:8200'"
-	@echo "  export VAULT_TOKEN='root'"
-	@echo "  vault secrets enable -path=crypto -plugin-name=$(PLUGIN_NAME) plugin"
-	@echo ""
-	vault server -dev -dev-root-token-id=root -dev-plugin-dir=$$(pwd)/$(BUILD_DIR)
+# Build, restart container, register and enable plugin (one-shot dev reload)
+VAULT_ADDR := http://127.0.0.1:8200
+VAULT_TOKEN := root
 
-# Register plugin (production environment)
-register:
+dev: build-linux
+	@echo "Restarting Vault container..."
+	docker compose down 2>/dev/null || true
+	docker compose up -d
+	@echo "Waiting for Vault to be ready..."
+	@for i in $$(seq 1 30); do \
+		if curl -sf $(VAULT_ADDR)/v1/sys/health > /dev/null 2>&1; then \
+			echo "Vault is ready."; \
+			break; \
+		fi; \
+		if [ $$i -eq 30 ]; then \
+			echo "Error: Vault failed to start within 30s"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
 	@echo "Registering plugin $(VERSION)..."
-	@SHA256=$$(cat $(PLUGIN_BINARY).sha256) && \
-	vault plugin register -sha256=$$SHA256 -version=$(VERSION) secret $(PLUGIN_NAME)
-
-# Enable plugin at /crypto path
-enable:
-	@echo "Enabling plugin at path 'crypto'..."
-	vault secrets enable -path=crypto -plugin-name=$(PLUGIN_NAME) plugin
-
-# Disable plugin
-disable:
-	@echo "Disabling plugin..."
-	vault secrets disable crypto
+	@SHA256=$$(shasum -a 256 $(BUILD_DIR)/$(PLUGIN_BINARY) | cut -d ' ' -f1) && \
+	curl -sf -X POST \
+		-H "X-Vault-Token: $(VAULT_TOKEN)" \
+		-d "{\"sha256\":\"$$SHA256\",\"command\":\"$(PLUGIN_BINARY)\",\"version\":\"$(VERSION)\"}" \
+		$(VAULT_ADDR)/v1/sys/plugins/catalog/secret/$(PLUGIN_NAME) > /dev/null
+	@echo "Enabling plugin at /crypto..."
+	@curl -sf -X POST \
+		-H "X-Vault-Token: $(VAULT_TOKEN)" \
+		-d '{"type":"$(PLUGIN_NAME)","plugin_version":"$(VERSION)"}' \
+		$(VAULT_ADDR)/v1/sys/mounts/crypto > /dev/null
+	@echo ""
+	@echo "=== Plugin ready ==="
+	@echo "  VAULT_ADDR:  $(VAULT_ADDR)"
+	@echo "  VAULT_TOKEN: $(VAULT_TOKEN)"
+	@echo "  Mount path:  /crypto"
+	@echo "  Version:     $(VERSION)"
 
 # Build for multiple platforms
 build-all:
@@ -116,7 +128,7 @@ help:
 	@echo "  fmt            - Format code"
 	@echo "  lint           - Run linter"
 	@echo "  deps           - Download dependencies"
-	@echo "  dev            - Start Vault in dev mode (requires local vault)"
+	@echo "  dev     		- Build, restart container, register & enable plugin"
 	@echo "  quicktest      - Quick test with curl"
 	@echo "  deploy-start   - Start production Vault"
 	@echo "  deploy-stop    - Stop production Vault"

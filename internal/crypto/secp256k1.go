@@ -84,7 +84,7 @@ func (s *Secp256k1Signer) Sign(data []byte, prehashed bool) ([]byte, error) {
 	// compactSig[1:33] is R
 	// compactSig[33:65] is S
 	signature := make([]byte, 65)
-	copy(signature[0:32], compactSig[1:33])  // R
+	copy(signature[0:32], compactSig[1:33])   // R
 	copy(signature[32:64], compactSig[33:65]) // S
 	signature[64] = compactSig[0] - 27        // V (0 or 1)
 

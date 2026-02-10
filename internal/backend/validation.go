@@ -21,10 +21,8 @@ const (
 	MaxDataLength = 1024 * 1024
 )
 
-var (
-	// namePattern allows alphanumeric, underscore, and hyphen.
-	namePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-)
+// namePattern allows alphanumeric, underscore, and hyphen.
+var namePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // ValidateName validates a key name.
 func ValidateName(name string) error {
