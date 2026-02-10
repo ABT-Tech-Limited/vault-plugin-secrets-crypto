@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/model"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/model"
 )
 
 // Secp256r1Signer implements the Signer interface for P-256 (secp256r1) curve.

@@ -4,7 +4,7 @@ package crypto
 import (
 	"fmt"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/model"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/model"
 )
 
 // Signer defines the interface for cryptographic signing operations.

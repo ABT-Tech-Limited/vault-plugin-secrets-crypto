@@ -54,4 +54,11 @@ tmp/
 temp/
 *.tmp
 
+# Production deployment secrets
+deploy/.env
+deploy/tls/
+deploy/config/
+deploy/logs/
+deploy/vault-init-keys.json
+
 .claude

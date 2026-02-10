@@ -4,7 +4,7 @@ PLUGIN_DIR := cmd/$(PLUGIN_NAME)
 BUILD_DIR := build
 PLUGIN_BINARY := $(PLUGIN_NAME)-$(VERSION)
 
-.PHONY: all build build-linux clean test fmt lint dev register enable disable build-all
+.PHONY: all build build-linux clean test fmt lint dev register enable disable build-all deploy-start deploy-stop deploy-logs deploy-status
 
 all: fmt test build-linux
 
@@ -107,15 +107,32 @@ quicktest:
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  build        - Build for Linux/Docker (default)"
-	@echo "  build-linux  - Build for Linux amd64 (Docker)"
-	@echo "  build-local  - Build for current platform (macOS)"
-	@echo "  build-all    - Build for multiple platforms"
-	@echo "  clean        - Clean build artifacts"
-	@echo "  test         - Run tests"
-	@echo "  fmt          - Format code"
-	@echo "  lint         - Run linter"
-	@echo "  deps         - Download dependencies"
-	@echo "  dev          - Start Vault in dev mode (requires local vault)"
-	@echo "  quicktest    - Quick test with curl"
-	@echo "  help         - Show this help"
+	@echo "  build          - Build for Linux/Docker (default)"
+	@echo "  build-linux    - Build for Linux amd64 (Docker)"
+	@echo "  build-local    - Build for current platform (macOS)"
+	@echo "  build-all      - Build for multiple platforms"
+	@echo "  clean          - Clean build artifacts"
+	@echo "  test           - Run tests"
+	@echo "  fmt            - Format code"
+	@echo "  lint           - Run linter"
+	@echo "  deps           - Download dependencies"
+	@echo "  dev            - Start Vault in dev mode (requires local vault)"
+	@echo "  quicktest      - Quick test with curl"
+	@echo "  deploy-start   - Start production Vault"
+	@echo "  deploy-stop    - Stop production Vault"
+	@echo "  deploy-logs    - Follow production Vault logs"
+	@echo "  deploy-status  - Show production Vault status"
+	@echo "  help           - Show this help"
+
+# Production deployment
+deploy-start:
+	cd deploy && docker compose -f docker-compose.prod.yml --env-file .env up -d
+
+deploy-stop:
+	cd deploy && docker compose -f docker-compose.prod.yml --env-file .env down
+
+deploy-logs:
+	cd deploy && docker compose -f docker-compose.prod.yml logs -f
+
+deploy-status:
+	cd deploy && ./setup.sh status

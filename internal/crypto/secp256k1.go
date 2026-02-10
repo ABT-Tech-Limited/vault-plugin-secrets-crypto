@@ -8,7 +8,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/model"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/model"
 )
 
 // Secp256k1Signer implements the Signer interface for secp256k1 curve.

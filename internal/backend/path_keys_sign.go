@@ -9,8 +9,8 @@ import (
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/crypto"
-	"github.com/example/vault-plugin-secrets-crypto/internal/storage"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/crypto"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/storage"
 )
 
 func pathKeysSign(b *CryptoBackend) []*framework.Path {

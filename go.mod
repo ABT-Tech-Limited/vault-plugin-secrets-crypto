@@ -1,4 +1,4 @@
-module github.com/example/vault-plugin-secrets-crypto
+module github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto
 
 go 1.25.5
 

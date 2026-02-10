@@ -7,7 +7,7 @@ import (
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/plugin"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/backend"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/backend"
 )
 
 func main() {

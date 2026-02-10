@@ -8,7 +8,7 @@ import (
 
 	"github.com/hashicorp/vault/sdk/logical"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/model"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/model"
 )
 
 const (

@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"github.com/example/vault-plugin-secrets-crypto/internal/model"
+	"github.com/ABT-Tech-Limited/vault-plugin-secrets-crypto/internal/model"
 )
 
 // Ed25519Signer implements the Signer interface for Ed25519 curve.
