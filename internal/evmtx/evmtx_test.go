@@ -82,13 +82,13 @@ func TestPubKeyToAddress(t *testing.T) {
 }
 
 func TestPubKeyToChecksumAddress(t *testing.T) {
-	pubKey := "0x041287ad121fa53767cee3bf9261e86597dbb3fd839ecd7ddbe68b740d550da561bc7472315520e90edfcdbd5ac2311fdaed94cb13db944e78ecd024795036a6a2"
+	pubKey := "0x04aa7ef0388195609f3204a8ad148d147eb6d3f360b0a3ec4d1971db9e163ca66e2c4c42240614ec5645e37724445063c80ce490a3a77c90be26c7332c786c694d"
 
 	addr, err := PubKeyToChecksumAddress(pubKey)
 	if err != nil {
 		t.Fatalf("PubKeyToChecksumAddress error: %v", err)
 	}
-	want := "0xA0aAF6Ca16003d7C2d085ac84583667854064cef"
+	want := "0x5e6746671c75F2508a4dD40DcFda4729b6c61931"
 	if addr != want {
 		t.Errorf("PubKeyToChecksumAddress: got %s, want %s", addr, want)
 	}
