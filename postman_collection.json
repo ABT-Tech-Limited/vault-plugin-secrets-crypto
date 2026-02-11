@@ -1,0 +1,349 @@
+{
+  "info": {
+    "name": "Vault Crypto Plugin",
+    "description": "HashiCorp Vault Crypto Wallet Plugin API\n\nA Vault secrets engine plugin for blockchain cryptographic key management.\n\nSupported curves:\n- secp256k1 (EVM chains, Bitcoin)\n- secp256r1 (P-256 ECDSA)\n- ed25519 (Solana)\n\nWorkflow:\n1. Create keys via POST /keys\n2. Sign data via POST /keys/:id/sign\n3. For EVM transactions: build tx via POST /tx/build/evm, then sign the result",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8200/v1/crypto",
+      "type": "string"
+    },
+    {
+      "key": "vaultToken",
+      "value": "root",
+      "type": "string"
+    },
+    {
+      "key": "internal_id",
+      "value": "",
+      "type": "string",
+      "description": "Key internal ID (UUID), set automatically after creating a key"
+    }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-Vault-Token",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{vaultToken}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Keys",
+      "description": "Key management endpoints for creating, listing, and reading cryptographic keys.",
+      "item": [
+        {
+          "name": "Create Key (secp256k1)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    if (jsonData.data && jsonData.data.internal_id) {",
+                  "        pm.collectionVariables.set('internal_id', jsonData.data.internal_id);",
+                  "        console.log('Set internal_id: ' + jsonData.data.internal_id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"curve\": \"secp256k1\",\n  \"name\": \"my-eth-key\",\n  \"external_id\": \"user-001-eth\",\n  \"metadata\": {\n    \"chain\": \"ethereum\",\n    \"env\": \"dev\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/keys",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys"]
+            },
+            "description": "Create a new secp256k1 key pair for EVM-compatible chains (Ethereum, BSC, Polygon, etc.).\n\nFields:\n- `curve` (required): `secp256k1`, `secp256r1`, or `ed25519`\n- `name` (optional): Unique name, alphanumeric/underscore/hyphen, max 128 chars\n- `external_id` (optional): Unique external identifier, max 256 chars\n- `metadata` (optional): Key-value pairs, max 16 keys\n\nThe response `internal_id` is automatically saved as a collection variable for subsequent requests."
+          }
+        },
+        {
+          "name": "Create Key (secp256r1)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    if (jsonData.data && jsonData.data.internal_id) {",
+                  "        pm.collectionVariables.set('internal_id', jsonData.data.internal_id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"curve\": \"secp256r1\",\n  \"name\": \"my-p256-key\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/keys",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys"]
+            },
+            "description": "Create a new secp256r1 (P-256) key pair for general ECDSA signing."
+          }
+        },
+        {
+          "name": "Create Key (ed25519)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    if (jsonData.data && jsonData.data.internal_id) {",
+                  "        pm.collectionVariables.set('internal_id', jsonData.data.internal_id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"curve\": \"ed25519\",\n  \"name\": \"my-solana-key\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/keys",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys"]
+            },
+            "description": "Create a new ed25519 key pair for Solana and other Ed25519-based systems."
+          }
+        },
+        {
+          "name": "List Keys",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Vault-Request",
+                "value": "true"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/keys?list=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys"],
+              "query": [
+                {
+                  "key": "list",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "List all key internal IDs stored in the plugin.\n\nVault LIST operations use `GET` with `?list=true` query parameter (or the `LIST` HTTP method)."
+          }
+        },
+        {
+          "name": "Read Key",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/keys/{{internal_id}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys", "{{internal_id}}"]
+            },
+            "description": "Read key information by internal ID.\n\nReturns public key and metadata. Private keys are never exposed via the API.\n\nReplace `{{internal_id}}` with the key's UUID or use the auto-saved variable from Create Key."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Signing",
+      "description": "Data signing endpoints.",
+      "item": [
+        {
+          "name": "Sign Data (hex input)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": \"0x4a5c5d454721bbbb25540c3317521e71c373ae36458f960d2ad46ef088110e95\",\n  \"encoding\": \"hex\",\n  \"output_format\": \"hex\",\n  \"prehashed\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/keys/{{internal_id}}/sign",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys", "{{internal_id}}", "sign"]
+            },
+            "description": "Sign a 32-byte hash with the specified key.\n\nFields:\n- `data` (required): Data to sign, hex or base64 encoded\n- `encoding` (optional, default `hex`): Input encoding - `hex` or `base64`\n- `output_format` (optional, default `hex`): Output format - `hex`, `base64`, or `raw`\n- `prehashed` (optional, default `true`): Whether data is already hashed\n\nSignature formats:\n- secp256k1: 65 bytes (R[32] || S[32] || V[1]) - Ethereum compatible\n- secp256r1: 64 bytes (R[32] || S[32])\n- ed25519: 64 bytes"
+          }
+        },
+        {
+          "name": "Sign Data (base64 input)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": \"SlxdRUchv7slVAwzF1Ieccc64mRY+WDSrUbvCIEQ6ZU=\",\n  \"encoding\": \"base64\",\n  \"output_format\": \"hex\",\n  \"prehashed\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/keys/{{internal_id}}/sign",
+              "host": ["{{baseUrl}}"],
+              "path": ["keys", "{{internal_id}}", "sign"]
+            },
+            "description": "Sign data using base64-encoded input.\n\nThe same 32-byte hash as the hex example, but encoded in base64."
+          }
+        }
+      ]
+    },
+    {
+      "name": "EVM Transaction",
+      "description": "EVM transaction building endpoints.\n\nWorkflow:\n1. Build transaction → get signing hash\n2. Sign the hash with a secp256k1 key",
+      "item": [
+        {
+          "name": "Build Legacy Transaction",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tx_type\": \"legacy\",\n  \"chain_id\": 11155111,\n  \"nonce\": 0,\n  \"gas_limit\": 21000,\n  \"to\": \"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\n  \"value\": \"1000000000000000000\",\n  \"gas_price\": \"20000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/tx/build/evm",
+              "host": ["{{baseUrl}}"],
+              "path": ["tx", "build", "evm"]
+            },
+            "description": "Build a legacy (pre-EIP1559) EVM transaction and return the signing hash.\n\nFields:\n- `tx_type` (required): `legacy` or `eip1559`\n- `chain_id` (required): Chain ID (1=Mainnet, 11155111=Sepolia, etc.)\n- `nonce` (required): Transaction nonce\n- `gas_limit` (required): Gas limit\n- `to` (optional): Recipient address (0x-prefixed hex, omit for contract creation)\n- `value` (optional, default \"0\"): Transfer amount in wei (decimal string)\n- `data` (optional): Transaction calldata (hex)\n- `gas_price` (required for legacy): Gas price in wei (decimal string)\n\nThe response `data` field can be passed directly to the sign endpoint."
+          }
+        },
+        {
+          "name": "Build EIP-1559 Transaction",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tx_type\": \"eip1559\",\n  \"chain_id\": 11155111,\n  \"nonce\": 0,\n  \"gas_limit\": 21000,\n  \"to\": \"0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18\",\n  \"value\": \"1000000000000000000\",\n  \"max_fee_per_gas\": \"30000000000\",\n  \"max_priority_fee_per_gas\": \"2000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/tx/build/evm",
+              "host": ["{{baseUrl}}"],
+              "path": ["tx", "build", "evm"]
+            },
+            "description": "Build an EIP-1559 EVM transaction and return the signing hash.\n\nFields:\n- `tx_type` (required): `eip1559`\n- `chain_id` (required): Chain ID\n- `nonce` (required): Transaction nonce\n- `gas_limit` (required): Gas limit\n- `to` (optional): Recipient address\n- `value` (optional, default \"0\"): Transfer amount in wei\n- `data` (optional): Transaction calldata (hex)\n- `max_fee_per_gas` (required for eip1559): Max fee per gas in wei\n- `max_priority_fee_per_gas` (required for eip1559): Max priority fee in wei\n\nThe response `data` field can be passed directly to the sign endpoint."
+          }
+        },
+        {
+          "name": "Build Contract Deployment",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tx_type\": \"eip1559\",\n  \"chain_id\": 11155111,\n  \"nonce\": 0,\n  \"gas_limit\": 3000000,\n  \"value\": \"0\",\n  \"data\": \"0x608060405234801561001057600080fd5b50\",\n  \"max_fee_per_gas\": \"30000000000\",\n  \"max_priority_fee_per_gas\": \"2000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/tx/build/evm",
+              "host": ["{{baseUrl}}"],
+              "path": ["tx", "build", "evm"]
+            },
+            "description": "Build a contract deployment transaction (no `to` field).\n\nThe `data` field contains the contract bytecode."
+          }
+        },
+        {
+          "name": "Build ERC-20 Transfer",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tx_type\": \"eip1559\",\n  \"chain_id\": 11155111,\n  \"nonce\": 1,\n  \"gas_limit\": 65000,\n  \"to\": \"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\",\n  \"value\": \"0\",\n  \"data\": \"0xa9059cbb000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f2bd180000000000000000000000000000000000000000000000000000000005f5e100\",\n  \"max_fee_per_gas\": \"30000000000\",\n  \"max_priority_fee_per_gas\": \"2000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/tx/build/evm",
+              "host": ["{{baseUrl}}"],
+              "path": ["tx", "build", "evm"]
+            },
+            "description": "Build an ERC-20 token transfer transaction.\n\nThe `data` field contains the ABI-encoded `transfer(address,uint256)` call:\n- Function selector: `0xa9059cbb`\n- Recipient address (padded to 32 bytes)\n- Amount (padded to 32 bytes, here: 100000000 = 100 USDC with 6 decimals)"
+          }
+        }
+      ]
+    }
+  ]
+}
