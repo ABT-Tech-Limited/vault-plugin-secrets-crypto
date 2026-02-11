@@ -27,7 +27,7 @@ func pathKeys(b *CryptoBackend) []*framework.Path {
 				},
 				"name": {
 					Type:        framework.TypeString,
-					Description: "Unique name for the key (required, alphanumeric, underscore, hyphen only)",
+					Description: "Name for the key (required, alphanumeric, underscore, hyphen only)",
 					Required:    true,
 				},
 				"external_id": {
@@ -225,7 +225,7 @@ This endpoint manages cryptographic keys for blockchain applications.
 CREATE (POST /keys):
   Required:
     - curve: The elliptic curve type (secp256k1, secp256r1, or ed25519)
-    - name: A unique name for the key (alphanumeric, underscore, hyphen)
+    - name: A name for the key (alphanumeric, underscore, hyphen)
     - external_id: A unique external identifier (alphanumeric, dot, underscore, hyphen)
 
   Optional:

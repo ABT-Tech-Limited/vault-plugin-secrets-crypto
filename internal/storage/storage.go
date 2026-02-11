@@ -14,8 +14,6 @@ import (
 const (
 	// keyPrefix is the storage prefix for key data.
 	keyPrefix = "keys/"
-	// indexNamePrefix is the storage prefix for name index.
-	indexNamePrefix = "index/name/"
 	// indexExtIDPrefix is the storage prefix for external_id index.
 	indexExtIDPrefix = "index/external_id/"
 )
@@ -31,19 +29,8 @@ func NewKeyStorage(s logical.Storage) *KeyStorage {
 }
 
 // SaveKey saves a key and creates necessary indexes.
-// Returns an error if name or external_id already exists for a different key.
+// Returns an error if external_id already exists for a different key.
 func (ks *KeyStorage) SaveKey(ctx context.Context, key *model.Key) error {
-	// Check name uniqueness
-	if key.Name != "" {
-		existing, err := ks.GetByName(ctx, key.Name)
-		if err != nil {
-			return fmt.Errorf("failed to check name uniqueness: %w", err)
-		}
-		if existing != nil && existing.InternalID != key.InternalID {
-			return fmt.Errorf("name '%s' already exists", key.Name)
-		}
-	}
-
 	// Check external_id uniqueness
 	if key.ExternalID != "" {
 		existing, err := ks.GetByExternalID(ctx, key.ExternalID)
@@ -69,17 +56,6 @@ func (ks *KeyStorage) SaveKey(ctx context.Context, key *model.Key) error {
 	}
 	if err := ks.storage.Put(ctx, entry); err != nil {
 		return fmt.Errorf("failed to store key: %w", err)
-	}
-
-	// Create name index
-	if key.Name != "" {
-		indexEntry := &logical.StorageEntry{
-			Key:   indexNamePrefix + key.Name,
-			Value: []byte(key.InternalID),
-		}
-		if err := ks.storage.Put(ctx, indexEntry); err != nil {
-			return fmt.Errorf("failed to create name index: %w", err)
-		}
 	}
 
 	// Create external_id index
@@ -112,19 +88,6 @@ func (ks *KeyStorage) GetByInternalID(ctx context.Context, id string) (*model.Ke
 		return nil, fmt.Errorf("failed to unmarshal key: %w", err)
 	}
 	return &key, nil
-}
-
-// GetByName retrieves a key by its name.
-// Returns nil if not found.
-func (ks *KeyStorage) GetByName(ctx context.Context, name string) (*model.Key, error) {
-	entry, err := ks.storage.Get(ctx, indexNamePrefix+name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read name index: %w", err)
-	}
-	if entry == nil {
-		return nil, nil
-	}
-	return ks.GetByInternalID(ctx, string(entry.Value))
 }
 
 // GetByExternalID retrieves a key by its external ID.

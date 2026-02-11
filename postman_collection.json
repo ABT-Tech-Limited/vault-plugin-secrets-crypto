@@ -83,7 +83,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["keys"]
             },
-            "description": "Create a new secp256k1 key pair for EVM-compatible chains (Ethereum, BSC, Polygon, etc.).\n\nFields:\n- `curve` (required): `secp256k1`, `secp256r1`, or `ed25519`\n- `name` (required): Unique name, alphanumeric/underscore/hyphen, max 128 chars\n- `external_id` (required): Unique external identifier, alphanumeric/dot/underscore/hyphen, max 256 chars\n- `metadata` (optional): Key-value pairs, max 16 keys\n\nThe response `external_id` is automatically saved as a collection variable for subsequent requests."
+            "description": "Create a new secp256k1 key pair for EVM-compatible chains (Ethereum, BSC, Polygon, etc.).\n\nFields:\n- `curve` (required): `secp256k1`, `secp256r1`, or `ed25519`\n- `name` (required): Key name (not unique), alphanumeric/underscore/hyphen, max 128 chars\n- `external_id` (required): Unique external identifier, alphanumeric/dot/underscore/hyphen, max 256 chars\n- `metadata` (optional): Key-value pairs, max 16 keys\n\nThe response `external_id` is automatically saved as a collection variable for subsequent requests."
           }
         },
         {

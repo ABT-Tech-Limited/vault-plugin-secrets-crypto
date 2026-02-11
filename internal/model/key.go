@@ -32,7 +32,7 @@ type Key struct {
 	// InternalID is the system-generated unique identifier (UUID).
 	InternalID string `json:"internal_id"`
 
-	// Name is the user-provided name (required, must be unique).
+	// Name is the user-provided name (required).
 	Name string `json:"name"`
 
 	// ExternalID is the user-provided external identifier (required, must be unique).
