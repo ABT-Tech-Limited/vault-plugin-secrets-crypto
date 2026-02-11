@@ -2,27 +2,27 @@
 // using the Vault crypto plugin's API-driven approach.
 //
 // This tool uses the plugin's /tx/build/evm endpoint to construct signing data
-// server-side, then calls /keys/:id/sign to produce the signature. The client
+// server-side, then calls /keys/:external_id/sign to produce the signature. The client
 // only needs to assemble the final signed transaction for broadcasting.
 //
 // Workflow:
 //
-//	Step 1: GET  /crypto/keys/:id          -> public_key, derive ETH address
-//	Step 2: POST /crypto/tx/build/evm      -> {data, prehashed, encoding}
-//	Step 3: POST /crypto/keys/:id/sign     -> {signature}
-//	Step 4: Assemble signed tx locally     -> raw transaction hex
+//	Step 1: GET  /crypto/keys/:external_id          -> public_key, derive ETH address
+//	Step 2: POST /crypto/tx/build/evm               -> {data, prehashed, encoding}
+//	Step 3: POST /crypto/keys/:external_id/sign     -> {signature}
+//	Step 4: Assemble signed tx locally               -> raw transaction hex
 //	Step 5: Broadcast via eth_sendRawTransaction (optional)
 //
 // Usage:
 //
 //	# Legacy transaction (default)
 //	go run ./test/signevmtx \
-//	  -key-id <uuid> -to <addr> -value 0.0001 \
+//	  -key-id <external_id> -to <addr> -value 0.0001 \
 //	  -nonce 1 -gas-limit 21000
 //
 //	# EIP-1559 transaction
 //	go run ./test/signevmtx -tx-type eip1559 \
-//	  -key-id <uuid> -to <addr> -value 0.0001 \
+//	  -key-id <external_id> -to <addr> -value 0.0001 \
 //	  -max-fee 30 -priority-fee 2 -nonce 1 -gas-limit 21000
 //
 // Environment variables:
@@ -48,7 +48,7 @@ import (
 
 func main() {
 	// Common flags
-	keyID := flag.String("key-id", "", "Vault key internal ID (required)")
+	keyID := flag.String("key-id", "", "Vault key external ID (required)")
 	toAddr := flag.String("to", "", "Recipient ETH address (required)")
 	valueETH := flag.String("value", "0", "Value to send in ETH (e.g. 0.0001)")
 	nonce := flag.Int("nonce", 0, "Transaction nonce")
@@ -98,7 +98,7 @@ func main() {
 	if err != nil {
 		fatal("Failed to derive ETH address: %v", err)
 	}
-	fmt.Printf("  Key ID:     %s\n", *keyID)
+	fmt.Printf("  External ID: %s\n", *keyID)
 	fmt.Printf("  Public Key: %s\n", publicKey)
 	fmt.Printf("  ETH Addr:   %s\n", ethAddr)
 

@@ -27,11 +27,13 @@ func pathKeys(b *CryptoBackend) []*framework.Path {
 				},
 				"name": {
 					Type:        framework.TypeString,
-					Description: "Optional unique name for the key (alphanumeric, underscore, hyphen only)",
+					Description: "Unique name for the key (required, alphanumeric, underscore, hyphen only)",
+					Required:    true,
 				},
 				"external_id": {
 					Type:        framework.TypeString,
-					Description: "Optional unique external identifier for the key",
+					Description: "Unique external identifier for the key (required, alphanumeric, dot, underscore, hyphen only)",
+					Required:    true,
 				},
 				"metadata": {
 					Type:        framework.TypeKVPairs,
@@ -52,12 +54,12 @@ func pathKeys(b *CryptoBackend) []*framework.Path {
 			HelpDescription: pathKeysHelpDescription,
 		},
 		{
-			// GET /keys/:internal_id - Read key info
-			Pattern: "keys/" + framework.GenericNameRegex("internal_id"),
+			// GET /keys/:external_id - Read key info
+			Pattern: "keys/" + framework.GenericNameRegex("external_id"),
 			Fields: map[string]*framework.FieldSchema{
-				"internal_id": {
+				"external_id": {
 					Type:        framework.TypeString,
-					Description: "Internal ID of the key (UUID)",
+					Description: "External identifier of the key",
 					Required:    true,
 				},
 			},
@@ -68,7 +70,7 @@ func pathKeys(b *CryptoBackend) []*framework.Path {
 				},
 			},
 			HelpSynopsis:    "Read a specific key",
-			HelpDescription: "Read key information (never includes private key) by its internal ID. Keys cannot be deleted for security reasons.",
+			HelpDescription: "Read key information (never includes private key) by its external ID.",
 		},
 	}
 }
@@ -157,7 +159,7 @@ func (b *CryptoBackend) pathKeyCreate(
 	}, nil
 }
 
-// pathKeyRead handles GET /keys/:internal_id
+// pathKeyRead handles GET /keys/:external_id
 func (b *CryptoBackend) pathKeyRead(
 	ctx context.Context,
 	req *logical.Request,
@@ -166,13 +168,13 @@ func (b *CryptoBackend) pathKeyRead(
 	b.lock.RLock()
 	defer b.lock.RUnlock()
 
-	internalID := d.Get("internal_id").(string)
-	if internalID == "" {
-		return logical.ErrorResponse("internal_id is required"), nil
+	externalID := d.Get("external_id").(string)
+	if externalID == "" {
+		return logical.ErrorResponse("external_id is required"), nil
 	}
 
 	ks := storage.NewKeyStorage(req.Storage)
-	key, err := ks.GetByInternalID(ctx, internalID)
+	key, err := ks.GetByExternalID(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +211,7 @@ func (b *CryptoBackend) pathKeyList(
 	defer b.lock.RUnlock()
 
 	ks := storage.NewKeyStorage(req.Storage)
-	ids, err := ks.ListKeys(ctx)
+	ids, err := ks.ListExternalIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -223,18 +225,20 @@ This endpoint manages cryptographic keys for blockchain applications.
 CREATE (POST /keys):
   Required:
     - curve: The elliptic curve type (secp256k1, secp256r1, or ed25519)
+    - name: A unique name for the key (alphanumeric, underscore, hyphen)
+    - external_id: A unique external identifier (alphanumeric, dot, underscore, hyphen)
 
   Optional:
-    - name: A unique name for the key (alphanumeric, underscore, hyphen)
-    - external_id: A unique external identifier
     - metadata: Key-value pairs for additional information
 
   Returns:
-    - internal_id: System-generated UUID for the key
-    - name, external_id, curve, created_at, metadata
+    - name, external_id, curve, public_key, created_at, metadata
 
 LIST (GET /keys):
-  Returns a list of all keys with their information (excluding private keys).
+  Returns a list of all key external IDs.
+
+READ (GET /keys/:external_id):
+  Returns key information by external_id (excluding private keys).
 
 Security:
   - Private keys are never returned in any response

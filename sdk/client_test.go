@@ -65,9 +65,8 @@ func TestCreateKey(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"internal_id": "uuid-123",
 				"name":        "test-key",
-				"external_id": "",
+				"external_id": "ext-123",
 				"curve":       "secp256k1",
 				"public_key":  "0x04abcdef",
 				"created_at":  "2024-01-01T00:00:00Z",
@@ -77,14 +76,15 @@ func TestCreateKey(t *testing.T) {
 	})
 
 	key, err := client.CreateKey(context.Background(), &CreateKeyRequest{
-		Curve: "secp256k1",
-		Name:  "test-key",
+		Curve:      "secp256k1",
+		Name:       "test-key",
+		ExternalID: "ext-123",
 	})
 	if err != nil {
 		t.Fatalf("CreateKey: %v", err)
 	}
-	if key.InternalID != "uuid-123" {
-		t.Errorf("expected internal_id uuid-123, got %s", key.InternalID)
+	if key.ExternalID != "ext-123" {
+		t.Errorf("expected external_id ext-123, got %s", key.ExternalID)
 	}
 	if key.Curve != "secp256k1" {
 		t.Errorf("expected curve secp256k1, got %s", key.Curve)
@@ -106,7 +106,7 @@ func TestListKeys(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"keys": []string{"uuid-1", "uuid-2", "uuid-3"},
+				"keys": []string{"ext-1", "ext-2", "ext-3"},
 			},
 		})
 	})
@@ -118,7 +118,7 @@ func TestListKeys(t *testing.T) {
 	if len(keys) != 3 {
 		t.Fatalf("expected 3 keys, got %d", len(keys))
 	}
-	if keys[0] != "uuid-1" || keys[1] != "uuid-2" || keys[2] != "uuid-3" {
+	if keys[0] != "ext-1" || keys[1] != "ext-2" || keys[2] != "ext-3" {
 		t.Errorf("unexpected keys: %v", keys)
 	}
 }
@@ -146,16 +146,15 @@ func TestReadKey(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/v1/crypto/keys/uuid-456") {
+		if !strings.HasSuffix(r.URL.Path, "/v1/crypto/keys/ext-456") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"internal_id": "uuid-456",
 				"name":        "my-key",
-				"external_id": "ext-1",
+				"external_id": "ext-456",
 				"curve":       "ed25519",
 				"public_key":  "0xdeadbeef",
 				"created_at":  "2024-06-15T12:00:00Z",
@@ -164,12 +163,12 @@ func TestReadKey(t *testing.T) {
 		})
 	})
 
-	key, err := client.ReadKey(context.Background(), "uuid-456")
+	key, err := client.ReadKey(context.Background(), "ext-456")
 	if err != nil {
 		t.Fatalf("ReadKey: %v", err)
 	}
-	if key.InternalID != "uuid-456" {
-		t.Errorf("expected uuid-456, got %s", key.InternalID)
+	if key.ExternalID != "ext-456" {
+		t.Errorf("expected ext-456, got %s", key.ExternalID)
 	}
 	if key.Name != "my-key" {
 		t.Errorf("expected my-key, got %s", key.Name)
@@ -184,7 +183,7 @@ func TestSign(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/v1/crypto/keys/uuid-789/sign") {
+		if !strings.HasSuffix(r.URL.Path, "/v1/crypto/keys/ext-789/sign") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
@@ -201,13 +200,13 @@ func TestSign(t *testing.T) {
 			"data": map[string]any{
 				"signature":   "0xsig123",
 				"curve":       "secp256k1",
-				"internal_id": "uuid-789",
+				"external_id": "ext-789",
 			},
 		})
 	})
 
 	prehashed := true
-	resp, err := client.Sign(context.Background(), "uuid-789", &SignRequest{
+	resp, err := client.Sign(context.Background(), "ext-789", &SignRequest{
 		Data:      "0xabcdef",
 		Prehashed: &prehashed,
 	})
@@ -217,8 +216,8 @@ func TestSign(t *testing.T) {
 	if resp.Signature != "0xsig123" {
 		t.Errorf("expected signature 0xsig123, got %s", resp.Signature)
 	}
-	if resp.InternalID != "uuid-789" {
-		t.Errorf("expected internal_id uuid-789, got %s", resp.InternalID)
+	if resp.ExternalID != "ext-789" {
+		t.Errorf("expected external_id ext-789, got %s", resp.ExternalID)
 	}
 }
 
@@ -233,13 +232,13 @@ func TestSign_PrehashedFalse(t *testing.T) {
 			"data": map[string]any{
 				"signature":   "0xsig",
 				"curve":       "secp256k1",
-				"internal_id": "uuid-1",
+				"external_id": "ext-1",
 			},
 		})
 	})
 
 	prehashed := false
-	_, err := client.Sign(context.Background(), "uuid-1", &SignRequest{
+	_, err := client.Sign(context.Background(), "ext-1", &SignRequest{
 		Data:      "0xdeadbeef",
 		Prehashed: &prehashed,
 	})
@@ -401,7 +400,7 @@ func TestCustomMountPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"keys": []string{"uuid-1"},
+				"keys": []string{"ext-1"},
 			},
 		})
 	})
@@ -415,7 +414,7 @@ func TestCustomMountPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"keys": []string{"uuid-1"},
+				"keys": []string{"ext-1"},
 			},
 		})
 	}))

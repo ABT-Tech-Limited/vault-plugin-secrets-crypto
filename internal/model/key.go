@@ -32,11 +32,11 @@ type Key struct {
 	// InternalID is the system-generated unique identifier (UUID).
 	InternalID string `json:"internal_id"`
 
-	// Name is the optional user-provided name (must be unique if set).
-	Name string `json:"name,omitempty"`
+	// Name is the user-provided name (required, must be unique).
+	Name string `json:"name"`
 
-	// ExternalID is the optional user-provided external identifier (must be unique if set).
-	ExternalID string `json:"external_id,omitempty"`
+	// ExternalID is the user-provided external identifier (required, must be unique).
+	ExternalID string `json:"external_id"`
 
 	// Curve is the elliptic curve type used by this key.
 	Curve CurveType `json:"curve"`
@@ -54,9 +54,8 @@ type Key struct {
 
 // KeyInfo is the key information returned to clients (without private key).
 type KeyInfo struct {
-	InternalID string            `json:"internal_id"`
-	Name       string            `json:"name,omitempty"`
-	ExternalID string            `json:"external_id,omitempty"`
+	Name       string            `json:"name"`
+	ExternalID string            `json:"external_id"`
 	Curve      CurveType         `json:"curve"`
 	PublicKey  string            `json:"public_key,omitempty"` // hex encoded
 	CreatedAt  time.Time         `json:"created_at"`
@@ -66,7 +65,6 @@ type KeyInfo struct {
 // ToInfo converts a Key to KeyInfo (strips private key).
 func (k *Key) ToInfo() *KeyInfo {
 	return &KeyInfo{
-		InternalID: k.InternalID,
 		Name:       k.Name,
 		ExternalID: k.ExternalID,
 		Curve:      k.Curve,
@@ -78,9 +76,8 @@ func (k *Key) ToInfo() *KeyInfo {
 // ToResponseData converts KeyInfo to a map for API response.
 func (ki *KeyInfo) ToResponseData() map[string]interface{} {
 	data := map[string]interface{}{
-		"internal_id": ki.InternalID,
-		"curve":       string(ki.Curve),
-		"created_at":  ki.CreatedAt.Format(time.RFC3339),
+		"curve":      string(ki.Curve),
+		"created_at": ki.CreatedAt.Format(time.RFC3339),
 	}
 	data["name"] = ki.Name
 	data["external_id"] = ki.ExternalID

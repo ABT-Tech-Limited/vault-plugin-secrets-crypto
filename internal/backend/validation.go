@@ -3,7 +3,6 @@ package backend
 import (
 	"fmt"
 	"regexp"
-	"unicode/utf8"
 )
 
 const (
@@ -27,7 +26,7 @@ var namePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // ValidateName validates a key name.
 func ValidateName(name string) error {
 	if name == "" {
-		return nil // Name is optional
+		return fmt.Errorf("name is required")
 	}
 	if len(name) > MaxNameLength {
 		return fmt.Errorf("name exceeds maximum length of %d characters", MaxNameLength)
@@ -38,16 +37,19 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// externalIDPattern allows alphanumeric, dot, underscore, and hyphen.
+var externalIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
 // ValidateExternalID validates an external ID.
 func ValidateExternalID(extID string) error {
 	if extID == "" {
-		return nil // External ID is optional
+		return fmt.Errorf("external_id is required")
 	}
 	if len(extID) > MaxExternalIDLength {
 		return fmt.Errorf("external_id exceeds maximum length of %d characters", MaxExternalIDLength)
 	}
-	if !utf8.ValidString(extID) {
-		return fmt.Errorf("external_id contains invalid UTF-8 characters")
+	if !externalIDPattern.MatchString(extID) {
+		return fmt.Errorf("external_id contains invalid characters: only alphanumeric, dot, underscore, and hyphen allowed")
 	}
 	return nil
 }

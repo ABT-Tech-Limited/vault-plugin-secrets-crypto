@@ -16,10 +16,10 @@
       "type": "string"
     },
     {
-      "key": "internal_id",
+      "key": "external_id",
       "value": "",
       "type": "string",
-      "description": "Key internal ID (UUID), set automatically after creating a key"
+      "description": "Key external ID, set automatically after creating a key"
     }
   ],
   "auth": {
@@ -57,9 +57,9 @@
                 "exec": [
                   "if (pm.response.code === 200) {",
                   "    var jsonData = pm.response.json();",
-                  "    if (jsonData.data && jsonData.data.internal_id) {",
-                  "        pm.collectionVariables.set('internal_id', jsonData.data.internal_id);",
-                  "        console.log('Set internal_id: ' + jsonData.data.internal_id);",
+                  "    if (jsonData.data && jsonData.data.external_id) {",
+                  "        pm.collectionVariables.set('external_id', jsonData.data.external_id);",
+                  "        console.log('Set external_id: ' + jsonData.data.external_id);",
                   "    }",
                   "}"
                 ]
@@ -83,7 +83,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["keys"]
             },
-            "description": "Create a new secp256k1 key pair for EVM-compatible chains (Ethereum, BSC, Polygon, etc.).\n\nFields:\n- `curve` (required): `secp256k1`, `secp256r1`, or `ed25519`\n- `name` (optional): Unique name, alphanumeric/underscore/hyphen, max 128 chars\n- `external_id` (optional): Unique external identifier, max 256 chars\n- `metadata` (optional): Key-value pairs, max 16 keys\n\nThe response `internal_id` is automatically saved as a collection variable for subsequent requests."
+            "description": "Create a new secp256k1 key pair for EVM-compatible chains (Ethereum, BSC, Polygon, etc.).\n\nFields:\n- `curve` (required): `secp256k1`, `secp256r1`, or `ed25519`\n- `name` (required): Unique name, alphanumeric/underscore/hyphen, max 128 chars\n- `external_id` (required): Unique external identifier, alphanumeric/dot/underscore/hyphen, max 256 chars\n- `metadata` (optional): Key-value pairs, max 16 keys\n\nThe response `external_id` is automatically saved as a collection variable for subsequent requests."
           }
         },
         {
@@ -96,8 +96,8 @@
                 "exec": [
                   "if (pm.response.code === 200) {",
                   "    var jsonData = pm.response.json();",
-                  "    if (jsonData.data && jsonData.data.internal_id) {",
-                  "        pm.collectionVariables.set('internal_id', jsonData.data.internal_id);",
+                  "    if (jsonData.data && jsonData.data.external_id) {",
+                  "        pm.collectionVariables.set('external_id', jsonData.data.external_id);",
                   "    }",
                   "}"
                 ]
@@ -109,7 +109,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"curve\": \"secp256r1\",\n  \"name\": \"my-p256-key\"\n}",
+              "raw": "{\n  \"curve\": \"secp256r1\",\n  \"name\": \"my-p256-key\",\n  \"external_id\": \"user-001-p256\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -134,8 +134,8 @@
                 "exec": [
                   "if (pm.response.code === 200) {",
                   "    var jsonData = pm.response.json();",
-                  "    if (jsonData.data && jsonData.data.internal_id) {",
-                  "        pm.collectionVariables.set('internal_id', jsonData.data.internal_id);",
+                  "    if (jsonData.data && jsonData.data.external_id) {",
+                  "        pm.collectionVariables.set('external_id', jsonData.data.external_id);",
                   "    }",
                   "}"
                 ]
@@ -147,7 +147,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"curve\": \"ed25519\",\n  \"name\": \"my-solana-key\"\n}",
+              "raw": "{\n  \"curve\": \"ed25519\",\n  \"name\": \"my-solana-key\",\n  \"external_id\": \"user-001-sol\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -183,7 +183,7 @@
                 }
               ]
             },
-            "description": "List all key internal IDs stored in the plugin.\n\nVault LIST operations use `GET` with `?list=true` query parameter (or the `LIST` HTTP method)."
+            "description": "List all key external IDs stored in the plugin.\n\nVault LIST operations use `GET` with `?list=true` query parameter (or the `LIST` HTTP method)."
           }
         },
         {
@@ -192,11 +192,11 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/keys/{{internal_id}}",
+              "raw": "{{baseUrl}}/keys/{{external_id}}",
               "host": ["{{baseUrl}}"],
-              "path": ["keys", "{{internal_id}}"]
+              "path": ["keys", "{{external_id}}"]
             },
-            "description": "Read key information by internal ID.\n\nReturns public key and metadata. Private keys are never exposed via the API.\n\nReplace `{{internal_id}}` with the key's UUID or use the auto-saved variable from Create Key."
+            "description": "Read key information by external ID.\n\nReturns public key and metadata. Private keys are never exposed via the API.\n\nReplace `{{external_id}}` with the key's external identifier or use the auto-saved variable from Create Key."
           }
         }
       ]
@@ -220,9 +220,9 @@
               }
             },
             "url": {
-              "raw": "{{baseUrl}}/keys/{{internal_id}}/sign",
+              "raw": "{{baseUrl}}/keys/{{external_id}}/sign",
               "host": ["{{baseUrl}}"],
-              "path": ["keys", "{{internal_id}}", "sign"]
+              "path": ["keys", "{{external_id}}", "sign"]
             },
             "description": "Sign a 32-byte hash with the specified key.\n\nFields:\n- `data` (required): Data to sign, hex or base64 encoded\n- `encoding` (optional, default `hex`): Input encoding - `hex` or `base64`\n- `output_format` (optional, default `hex`): Output format - `hex`, `base64`, or `raw`\n- `prehashed` (optional, default `true`): Whether data is already hashed\n\nSignature formats:\n- secp256k1: 65 bytes (R[32] || S[32] || V[1]) - Ethereum compatible\n- secp256r1: 64 bytes (R[32] || S[32])\n- ed25519: 64 bytes"
           }
@@ -242,9 +242,9 @@
               }
             },
             "url": {
-              "raw": "{{baseUrl}}/keys/{{internal_id}}/sign",
+              "raw": "{{baseUrl}}/keys/{{external_id}}/sign",
               "host": ["{{baseUrl}}"],
-              "path": ["keys", "{{internal_id}}", "sign"]
+              "path": ["keys", "{{external_id}}", "sign"]
             },
             "description": "Sign data using base64-encoded input.\n\nThe same 32-byte hash as the hex example, but encoded in base64."
           }

@@ -16,11 +16,11 @@ import (
 func pathKeysSign(b *CryptoBackend) []*framework.Path {
 	return []*framework.Path{
 		{
-			Pattern: "keys/" + framework.GenericNameRegex("internal_id") + "/sign",
+			Pattern: "keys/" + framework.GenericNameRegex("external_id") + "/sign",
 			Fields: map[string]*framework.FieldSchema{
-				"internal_id": {
+				"external_id": {
 					Type:        framework.TypeString,
-					Description: "Internal ID of the key (UUID)",
+					Description: "External identifier of the key",
 					Required:    true,
 				},
 				"data": {
@@ -56,7 +56,7 @@ func pathKeysSign(b *CryptoBackend) []*framework.Path {
 	}
 }
 
-// pathKeySign handles POST /keys/:internal_id/sign
+// pathKeySign handles POST /keys/:external_id/sign
 func (b *CryptoBackend) pathKeySign(
 	ctx context.Context,
 	req *logical.Request,
@@ -66,15 +66,15 @@ func (b *CryptoBackend) pathKeySign(
 	defer b.lock.RUnlock()
 
 	// Parse parameters
-	internalID := d.Get("internal_id").(string)
+	externalID := d.Get("external_id").(string)
 	dataStr := d.Get("data").(string)
 	encoding := d.Get("encoding").(string)
 	outputFormat := d.Get("output_format").(string)
 	prehashed := d.Get("prehashed").(bool)
 
 	// Validate parameters
-	if internalID == "" {
-		return logical.ErrorResponse("internal_id is required"), nil
+	if externalID == "" {
+		return logical.ErrorResponse("external_id is required"), nil
 	}
 	if dataStr == "" {
 		return logical.ErrorResponse("data is required"), nil
@@ -82,7 +82,7 @@ func (b *CryptoBackend) pathKeySign(
 
 	// Get key from storage
 	ks := storage.NewKeyStorage(req.Storage)
-	key, err := ks.GetByInternalID(ctx, internalID)
+	key, err := ks.GetByExternalID(ctx, externalID)
 	if err != nil {
 		// Don't expose internal errors
 		return logical.ErrorResponse("failed to retrieve key"), nil
@@ -147,7 +147,7 @@ func (b *CryptoBackend) pathKeySign(
 		Data: map[string]interface{}{
 			"signature":   signatureStr,
 			"curve":       string(key.Curve),
-			"internal_id": key.InternalID,
+			"external_id": key.ExternalID,
 		},
 	}, nil
 }
@@ -156,7 +156,7 @@ const pathKeysSignHelpDescription = `
 This endpoint signs data using the specified cryptographic key.
 
 Request:
-  - internal_id (path): The UUID of the key to use for signing
+  - external_id (path): The external identifier of the key to use for signing
   - data (required): The data to sign (hex or base64 encoded)
   - encoding: Input encoding - 'hex' (default) or 'base64'
   - output_format: Output format - 'hex' (default), 'base64', or 'raw'
@@ -165,7 +165,7 @@ Request:
 Response:
   - signature: The signature in the requested format
   - curve: The curve type used for signing
-  - internal_id: The key's internal ID
+  - external_id: The key's external identifier
 
 Signature Formats by Curve:
   - secp256k1: 65 bytes (R[32] || S[32] || V[1]) - Ethereum compatible
@@ -180,10 +180,10 @@ Examples:
   # Sign a Keccak256 hash for Ethereum
   curl -X POST -H "X-Vault-Token: $TOKEN" \
     -d '{"data":"0x1234...","encoding":"hex","prehashed":true}' \
-    $VAULT_ADDR/v1/crypto/keys/<uuid>/sign
+    $VAULT_ADDR/v1/crypto/keys/<external_id>/sign
 
   # Sign raw message with Ed25519
   curl -X POST -H "X-Vault-Token: $TOKEN" \
     -d '{"data":"SGVsbG8gV29ybGQ=","encoding":"base64","prehashed":false}' \
-    $VAULT_ADDR/v1/crypto/keys/<uuid>/sign
+    $VAULT_ADDR/v1/crypto/keys/<external_id>/sign
 `

@@ -148,3 +148,12 @@ func (ks *KeyStorage) ListKeys(ctx context.Context) ([]string, error) {
 	}
 	return entries, nil
 }
+
+// ListExternalIDs returns a list of all key external IDs.
+func (ks *KeyStorage) ListExternalIDs(ctx context.Context) ([]string, error) {
+	entries, err := ks.storage.List(ctx, indexExtIDPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list external IDs: %w", err)
+	}
+	return entries, nil
+}

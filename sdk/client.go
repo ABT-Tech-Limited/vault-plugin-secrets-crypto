@@ -81,7 +81,7 @@ func (c *httpClient) CreateKey(ctx context.Context, req *CreateKeyRequest) (*Key
 	return &key, nil
 }
 
-// ListKeys returns a list of all key internal IDs.
+// ListKeys returns a list of all key external IDs.
 func (c *httpClient) ListKeys(ctx context.Context) ([]string, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/keys?list=true", nil)
 	if err != nil {
@@ -101,9 +101,9 @@ func (c *httpClient) ListKeys(ctx context.Context) ([]string, error) {
 	return result.Keys, nil
 }
 
-// ReadKey retrieves key information by its internal ID.
-func (c *httpClient) ReadKey(ctx context.Context, internalID string) (*Key, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/keys/"+internalID, nil)
+// ReadKey retrieves key information by its external ID.
+func (c *httpClient) ReadKey(ctx context.Context, externalID string) (*Key, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/keys/"+externalID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +115,8 @@ func (c *httpClient) ReadKey(ctx context.Context, internalID string) (*Key, erro
 }
 
 // Sign signs data with the specified key.
-func (c *httpClient) Sign(ctx context.Context, internalID string, req *SignRequest) (*SignResponse, error) {
-	resp, err := c.do(ctx, http.MethodPost, "/keys/"+internalID+"/sign", req)
+func (c *httpClient) Sign(ctx context.Context, externalID string, req *SignRequest) (*SignResponse, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/keys/"+externalID+"/sign", req)
 	if err != nil {
 		return nil, err
 	}

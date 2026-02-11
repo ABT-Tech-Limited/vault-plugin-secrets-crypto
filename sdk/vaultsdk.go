@@ -7,14 +7,14 @@ type Client interface {
 	// CreateKey creates a new cryptographic key pair.
 	CreateKey(ctx context.Context, req *CreateKeyRequest) (*Key, error)
 
-	// ListKeys returns a list of all key internal IDs.
+	// ListKeys returns a list of all key external IDs.
 	ListKeys(ctx context.Context) ([]string, error)
 
-	// ReadKey retrieves key information by its internal ID.
-	ReadKey(ctx context.Context, internalID string) (*Key, error)
+	// ReadKey retrieves key information by its external ID.
+	ReadKey(ctx context.Context, externalID string) (*Key, error)
 
 	// Sign signs data with the specified key.
-	Sign(ctx context.Context, internalID string, req *SignRequest) (*SignResponse, error)
+	Sign(ctx context.Context, externalID string, req *SignRequest) (*SignResponse, error)
 
 	// BuildEVMTransaction builds EVM transaction signing data.
 	BuildEVMTransaction(ctx context.Context, req *BuildEVMTransactionRequest) (*BuildEVMTransactionResponse, error)
@@ -22,13 +22,10 @@ type Client interface {
 
 // Key represents the public information about a cryptographic key.
 type Key struct {
-	// InternalID is the system-generated unique identifier (UUID).
-	InternalID string `json:"internal_id"`
-
-	// Name is the optional user-provided name.
+	// Name is the user-provided name.
 	Name string `json:"name"`
 
-	// ExternalID is the optional user-provided external identifier.
+	// ExternalID is the user-provided external identifier.
 	ExternalID string `json:"external_id"`
 
 	// Curve is the elliptic curve type: "secp256k1", "secp256r1", or "ed25519".
@@ -50,11 +47,11 @@ type CreateKeyRequest struct {
 	// Valid values: "secp256k1", "secp256r1", "ed25519".
 	Curve string `json:"curve"`
 
-	// Name is an optional unique name for the key.
-	Name string `json:"name,omitempty"`
+	// Name is a unique name for the key (required).
+	Name string `json:"name"`
 
-	// ExternalID is an optional unique external identifier.
-	ExternalID string `json:"external_id,omitempty"`
+	// ExternalID is a unique external identifier (required).
+	ExternalID string `json:"external_id"`
 
 	// Metadata is optional key-value metadata (max 16 keys).
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -85,8 +82,8 @@ type SignResponse struct {
 	// Curve is the elliptic curve type used for signing.
 	Curve string `json:"curve"`
 
-	// InternalID is the key's internal identifier.
-	InternalID string `json:"internal_id"`
+	// ExternalID is the key's external identifier.
+	ExternalID string `json:"external_id"`
 }
 
 // BuildEVMTransactionRequest contains the parameters for building

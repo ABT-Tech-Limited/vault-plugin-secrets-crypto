@@ -73,13 +73,13 @@ Features:
 - Secure key generation and storage
 - Private keys never leave Vault
 - Signing operations with various output formats
-- Unique key identification via internal_id, name, or external_id
+- Unique key identification via name or external_id
 
 Endpoints:
 - POST   /keys              - Create a new key
 - GET    /keys              - List all keys
-- GET    /keys/:internal_id - Read key info (no private key)
-- POST   /keys/:internal_id/sign - Sign data
+- GET    /keys/:external_id - Read key info (no private key)
+- POST   /keys/:external_id/sign - Sign data
 
 Security:
 - Private keys are encrypted at rest using Vault's storage encryption

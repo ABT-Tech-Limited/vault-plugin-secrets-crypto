@@ -10,7 +10,7 @@
 - **安全密钥生成**：使用加密安全随机数生成密钥
 - **私钥保护**：私钥永不离开 Vault，使用 SealWrap 加密存储
 - **灵活签名**：支持 hex/base64 输入输出格式
-- **唯一标识**：支持通过 internal_id、name 或 external_id 识别密钥
+- **唯一标识**：支持通过 name 或 external_id 识别密钥
 - **公钥获取**：API 返回公钥信息（私钥永不暴露）
 
 ## 快速开始
@@ -318,15 +318,14 @@ curl -X POST \
 
 **参数：**
 - `curve`（必需）：`secp256k1`、`secp256r1` 或 `ed25519`
-- `name`（可选）：密钥的唯一名称
-- `external_id`（可选）：外部标识符
+- `name`（必需）：密钥的唯一名称（仅允许字母、数字、下划线、连字符）
+- `external_id`（必需）：外部标识符（仅允许字母、数字、点、下划线、连字符）
 - `metadata`（可选）：键值对元数据（最多 16 个键）
 
 **响应：**
 ```json
 {
   "data": {
-    "internal_id": "550e8400-e29b-41d4-a716-446655440000",
     "name": "my-key",
     "external_id": "user-123",
     "curve": "secp256k1",
@@ -349,13 +348,12 @@ curl -X LIST \
 ```bash
 curl -X GET \
   -H "X-Vault-Token: $VAULT_TOKEN" \
-  $VAULT_ADDR/v1/crypto/keys/<internal_id>
+  $VAULT_ADDR/v1/crypto/keys/<external_id>
 ```
 
 **响应包含：**
-- `internal_id`：系统生成的 UUID
-- `name`：用户提供的名称（如果设置）
-- `external_id`：外部标识符（如果设置）
+- `name`：用户提供的名称
+- `external_id`：外部标识符
 - `curve`：椭圆曲线类型
 - `public_key`：十六进制编码的公钥（0x 前缀）
 - `created_at`：创建时间戳
@@ -366,7 +364,7 @@ curl -X GET \
 curl -X POST \
   -H "X-Vault-Token: $VAULT_TOKEN" \
   -d '{"data":"0x44fd2527dcebf3756a9cd61cf0b5313cb34e2d4de079810ed310b078e4616727","encoding":"hex","prehashed":true}' \
-  $VAULT_ADDR/v1/crypto/keys/<internal_id>/sign
+  $VAULT_ADDR/v1/crypto/keys/<external_id>/sign
 ```
 
 **参数：**
@@ -381,7 +379,7 @@ curl -X POST \
   "data": {
     "signature": "0x496c74441f3830feff4ef24df5a7ea5f100e1741e5bac85c206e1e0f51914d472815b8036e8ebfac06d88763deb3d68db214c46aa7cd12c8ebeaad109f98f9ed01",
     "curve": "secp256k1",
-    "internal_id": "550e8400-e29b-41d4-a716-446655440000"
+    "external_id": "user-123"
   }
 }
 ```
