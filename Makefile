@@ -4,7 +4,7 @@ PLUGIN_DIR := cmd/$(PLUGIN_NAME)
 BUILD_DIR := build
 PLUGIN_BINARY := $(PLUGIN_NAME)-$(VERSION)
 
-.PHONY: all build build-linux clean test fmt lint dev build-all deploy-start deploy-stop deploy-logs deploy-status
+.PHONY: all build build-linux clean test fmt lint dev dev-clean build-all deploy-start deploy-stop deploy-logs deploy-status
 
 all: fmt test build-linux
 
@@ -58,16 +58,15 @@ deps:
 
 # Build, restart container, register and enable plugin (one-shot dev reload)
 VAULT_ADDR := http://127.0.0.1:8200
-VAULT_TOKEN := root
 
 dev: build-linux
 	@echo "Restarting Vault container..."
 	docker compose down 2>/dev/null || true
 	docker compose up -d
-	@echo "Waiting for Vault to be ready..."
+	@echo "Waiting for Vault to start..."
 	@for i in $$(seq 1 30); do \
-		if curl -sf $(VAULT_ADDR)/v1/sys/health > /dev/null 2>&1; then \
-			echo "Vault is ready."; \
+		HTTP_CODE=$$(curl -s -o /dev/null -w '%{http_code}' $(VAULT_ADDR)/v1/sys/health 2>/dev/null); \
+		if [ "$$HTTP_CODE" != "000" ] && [ "$$HTTP_CODE" != "" ]; then \
 			break; \
 		fi; \
 		if [ $$i -eq 30 ]; then \
@@ -76,23 +75,68 @@ dev: build-linux
 		fi; \
 		sleep 1; \
 	done
-	@echo "Registering plugin $(VERSION)..."
-	@SHA256=$$(shasum -a 256 $(BUILD_DIR)/$(PLUGIN_BINARY) | cut -d ' ' -f1) && \
+	@# Initialize if needed (HTTP 501 = not initialized)
+	@HTTP_CODE=$$(curl -s -o /dev/null -w '%{http_code}' $(VAULT_ADDR)/v1/sys/health); \
+	if [ "$$HTTP_CODE" = "501" ]; then \
+		echo "Initializing Vault (first run)..."; \
+		INIT_RESP=$$(curl -s -X PUT $(VAULT_ADDR)/v1/sys/init -d '{"secret_shares":1,"secret_threshold":1}'); \
+		echo "$$INIT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['keys_base64'][0])" > vault-data/.unseal-key; \
+		echo "$$INIT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['root_token'])" > vault-data/.root-token; \
+		echo "  Unseal key saved to vault-data/.unseal-key"; \
+		echo "  Root token saved to vault-data/.root-token"; \
+	fi
+	@# Unseal if needed (HTTP 503 = sealed)
+	@HTTP_CODE=$$(curl -s -o /dev/null -w '%{http_code}' $(VAULT_ADDR)/v1/sys/health); \
+	if [ "$$HTTP_CODE" = "503" ]; then \
+		echo "Unsealing Vault..."; \
+		curl -s -X PUT $(VAULT_ADDR)/v1/sys/unseal -d "{\"key\":\"$$(cat vault-data/.unseal-key)\"}" > /dev/null; \
+	fi
+	@# Wait for Vault to be ready after unseal
+	@for i in $$(seq 1 10); do \
+		HTTP_CODE=$$(curl -s -o /dev/null -w '%{http_code}' $(VAULT_ADDR)/v1/sys/health); \
+		if [ "$$HTTP_CODE" = "200" ]; then \
+			echo "Vault is ready."; \
+			break; \
+		fi; \
+		if [ $$i -eq 10 ]; then \
+			echo "Error: Vault failed to become ready"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
+	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
+	echo "Registering plugin $(VERSION)..." && \
+	SHA256=$$(shasum -a 256 $(BUILD_DIR)/$(PLUGIN_BINARY) | cut -d ' ' -f1) && \
 	curl -sf -X POST \
-		-H "X-Vault-Token: $(VAULT_TOKEN)" \
+		-H "X-Vault-Token: $$VAULT_TOKEN" \
 		-d "{\"sha256\":\"$$SHA256\",\"command\":\"$(PLUGIN_BINARY)\",\"version\":\"$(VERSION)\"}" \
 		$(VAULT_ADDR)/v1/sys/plugins/catalog/secret/$(PLUGIN_NAME) > /dev/null
-	@echo "Enabling plugin at /crypto..."
-	@curl -sf -X POST \
-		-H "X-Vault-Token: $(VAULT_TOKEN)" \
+	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
+	echo "Enabling plugin at /crypto..." && \
+	curl -s -X POST \
+		-H "X-Vault-Token: $$VAULT_TOKEN" \
 		-d '{"type":"$(PLUGIN_NAME)","plugin_version":"$(VERSION)"}' \
-		$(VAULT_ADDR)/v1/sys/mounts/crypto > /dev/null
+		$(VAULT_ADDR)/v1/sys/mounts/crypto > /dev/null || true
+	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
+	echo "Reloading plugin..." && \
+	curl -s -X PUT \
+		-H "X-Vault-Token: $$VAULT_TOKEN" \
+		-d '{"mounts":["crypto/"]}' \
+		$(VAULT_ADDR)/v1/sys/plugins/reload/backend > /dev/null || true
 	@echo ""
-	@echo "=== Plugin ready ==="
-	@echo "  VAULT_ADDR:  $(VAULT_ADDR)"
-	@echo "  VAULT_TOKEN: $(VAULT_TOKEN)"
-	@echo "  Mount path:  /crypto"
-	@echo "  Version:     $(VERSION)"
+	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
+	echo "=== Plugin ready ===" && \
+	echo "  VAULT_ADDR:  $(VAULT_ADDR)" && \
+	echo "  VAULT_TOKEN: $$VAULT_TOKEN" && \
+	echo "  Mount path:  /crypto" && \
+	echo "  Version:     $(VERSION)"
+
+# Reset dev environment (remove all persistent data)
+dev-clean:
+	@echo "Cleaning Vault dev data..."
+	docker compose down 2>/dev/null || true
+	rm -rf vault-data
+	@echo "Dev environment reset. Run 'make dev' to start fresh."
 
 # Build for multiple platforms
 build-all:
@@ -106,14 +150,15 @@ build-all:
 
 # Quick test - create a key and sign
 quicktest:
-	@echo "Quick test: creating key and signing..."
-	@echo "Creating secp256k1 key..."
-	@curl -s -X POST -H "X-Vault-Token: root" \
+	@VAULT_TOKEN=$$(cat vault-data/.root-token 2>/dev/null || echo "root") && \
+	echo "Quick test: creating key and signing..." && \
+	echo "Creating secp256k1 key..." && \
+	curl -s -X POST -H "X-Vault-Token: $$VAULT_TOKEN" \
 		-d '{"curve":"secp256k1","name":"test-key"}' \
-		http://127.0.0.1:8200/v1/crypto/keys | jq .
-	@echo ""
-	@echo "Listing keys..."
-	@curl -s -X LIST -H "X-Vault-Token: root" \
+		http://127.0.0.1:8200/v1/crypto/keys | jq . && \
+	echo "" && \
+	echo "Listing keys..." && \
+	curl -s -X LIST -H "X-Vault-Token: $$VAULT_TOKEN" \
 		http://127.0.0.1:8200/v1/crypto/keys | jq .
 
 # Help
@@ -129,6 +174,7 @@ help:
 	@echo "  lint           - Run linter"
 	@echo "  deps           - Download dependencies"
 	@echo "  dev     		- Build, restart container, register & enable plugin"
+	@echo "  dev-clean		- Reset dev environment (remove all persistent data)"
 	@echo "  quicktest      - Quick test with curl"
 	@echo "  deploy-start   - Start production Vault"
 	@echo "  deploy-stop    - Stop production Vault"
