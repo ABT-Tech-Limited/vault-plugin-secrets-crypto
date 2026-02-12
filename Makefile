@@ -123,6 +123,20 @@ dev: build-linux
 		-H "X-Vault-Token: $$VAULT_TOKEN" \
 		-d '{"mounts":["crypto/"]}' \
 		$(VAULT_ADDR)/v1/sys/plugins/reload/backend > /dev/null || true
+	@# Wait for plugin to finish setup after reload
+	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
+	for i in $$(seq 1 15); do \
+		RESP=$$(curl -s -o /dev/null -w '%{http_code}' -X LIST \
+			-H "X-Vault-Token: $$VAULT_TOKEN" \
+			$(VAULT_ADDR)/v1/crypto/keys 2>/dev/null); \
+		if [ "$$RESP" = "200" ] || [ "$$RESP" = "404" ]; then \
+			break; \
+		fi; \
+		if [ $$i -eq 15 ]; then \
+			echo "Warning: Plugin may not be ready yet"; \
+		fi; \
+		sleep 1; \
+	done
 	@echo ""
 	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
 	echo "=== Plugin ready ===" && \
