@@ -14,8 +14,9 @@ listener "tcp" {
   tls_min_version = "tls12"
 }
 
-storage "file" {
-  path = "/vault/data"
+storage "raft" {
+  path    = "/vault/data"
+  node_id = "VAULT_NODE_ID_PLACEHOLDER"
 }
 
 plugin_directory = "/vault/plugins"

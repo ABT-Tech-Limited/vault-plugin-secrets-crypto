@@ -53,7 +53,7 @@
 │  │       │                              │    │
 │  │       ▼                              │    │
 │  │  ┌──────────┐                        │    │
-│  │  │ File     │                        │    │
+│  │  │ Raft     │                        │    │
 │  │  │ Storage  │                        │    │
 │  │  └──────────┘                        │    │
 │  └──────┬───────────────────────────────┘    │
@@ -101,6 +101,7 @@ deploy/
 │   ├── cert.pem
 │   └── key.pem
 ├── logs/                      # [自动生成] 审计日志目录
+├── backups/                   # [自动生成] Raft 快照备份目录
 └── vault-init-keys.json       # [自动生成] 初始化密钥（务必安全保管后删除）
 ```
 
@@ -430,65 +431,51 @@ curl -s --cacert tls/ca.pem -X LIST \
 
 ## 备份与恢复
 
-### 备份策略
+Vault 使用 Raft 存储后端，支持**在线热备份**，无需停机。
 
-Vault 数据存储在 Docker Named Volume 中。建议每日备份。
+### 在线备份（推荐）
 
-**方法 1：停机备份（推荐）**
-
-```bash
-# 停止 Vault
-./setup.sh stop
-
-# 备份 volume
-docker run --rm \
-  -v vault-crypto-data:/data:ro \
-  -v $(pwd)/backups:/backup \
-  alpine tar czf /backup/vault-backup-$(date +%Y%m%d).tar.gz -C /data .
-
-# 重启 Vault
-./setup.sh start
-./setup.sh vault-unseal  # Shamir 方式需要重新解封
-```
-
-**方法 2：在线备份**
+使用 Raft 快照 API 创建一致性备份，Vault 运行期间即可操作：
 
 ```bash
-# 直接从 volume 复制（Vault 运行中，可能存在数据不一致风险）
-docker run --rm \
-  -v vault-crypto-data:/data:ro \
-  -v $(pwd)/backups:/backup \
-  alpine tar czf /backup/vault-backup-$(date +%Y%m%d).tar.gz -C /data .
+# 使用 setup.sh（推荐）
+./setup.sh backup
+
+# 或使用 Makefile
+make deploy-backup
+
+# 备份文件保存在 backups/ 目录
+# 格式：backups/vault-backup-YYYYMMDD_HHMMSS.snap
 ```
+
+快照包含所有 Vault 数据（已加密），恢复时需要对应的 unseal keys。
 
 ### 恢复
 
 ```bash
-# 停止 Vault
-./setup.sh stop
+# 使用 setup.sh
+./setup.sh restore backups/vault-backup-20250215_120000.snap
 
-# 清空现有数据
-docker volume rm vault-crypto-data
-docker volume create vault-crypto-data
-
-# 恢复数据
-docker run --rm \
-  -v vault-crypto-data:/data \
-  -v $(pwd)/backups:/backup:ro \
-  alpine tar xzf /backup/vault-backup-YYYYMMDD.tar.gz -C /data
-
-# 重启
-./setup.sh start
-./setup.sh vault-unseal  # Shamir 方式
+# 或使用 Makefile
+make deploy-restore SNAPSHOT=backups/vault-backup-20250215_120000.snap
 ```
+
+恢复操作会**覆盖**当前所有 Vault 数据。恢复后 Vault 会自动重启，Shamir 模式下需要重新解封。
 
 ### 备份建议
 
 - 每日自动备份（cron job）
-- 备份文件加密存储
+- 备份文件加密存储（快照本身已加密，但建议额外加密传输）
 - 定期测试恢复流程
 - 保留最近 30 天的备份
 - **Unseal Keys 和 Root Token 单独备份，不与数据备份放在一起**
+
+**自动备份 cron 示例：**
+
+```bash
+# 每天凌晨 2 点自动备份（需设置 VAULT_TOKEN 环境变量）
+0 2 * * * cd /path/to/deploy && VAULT_TOKEN=hvs.xxx ./setup.sh backup
+```
 
 ---
 

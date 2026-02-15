@@ -194,6 +194,8 @@ help:
 	@echo "  deploy-stop    - Stop production Vault"
 	@echo "  deploy-logs    - Follow production Vault logs"
 	@echo "  deploy-status  - Show production Vault status"
+	@echo "  deploy-backup  - Create Raft snapshot backup (online)"
+	@echo "  deploy-restore - Restore from Raft snapshot"
 	@echo "  help           - Show this help"
 
 # Production deployment
@@ -208,3 +210,10 @@ deploy-logs:
 
 deploy-status:
 	cd deploy && ./setup.sh status
+
+deploy-backup:
+	cd deploy && ./setup.sh backup
+
+deploy-restore:
+	@if [ -z "$(SNAPSHOT)" ]; then echo "Usage: make deploy-restore SNAPSHOT=<file>"; exit 1; fi
+	cd deploy && ./setup.sh restore $(SNAPSHOT)

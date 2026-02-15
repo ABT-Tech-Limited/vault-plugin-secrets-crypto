@@ -13,6 +13,8 @@
 #   vault-unseal    Unseal Vault (Shamir mode)
 #   register-plugin Register and enable the crypto plugin
 #   status          Show Vault and plugin status
+#   backup          Create a Raft snapshot backup (online, no downtime)
+#   restore         Restore Vault from a Raft snapshot
 #   all             Run full first-time deployment
 #   help            Show this help message
 
@@ -72,7 +74,7 @@ curl_vault() {
 
 cmd_init_dirs() {
   info "Creating directory structure..."
-  mkdir -p config tls logs
+  mkdir -p config tls logs backups
   chmod 700 config tls
 
   # Check plugin binary
@@ -84,7 +86,7 @@ cmd_init_dirs() {
     ok "Plugin binary found: ../build/${plugin_binary}"
   fi
 
-  ok "Directories created: config/ tls/ logs/"
+  ok "Directories created: config/ tls/ logs/ backups/"
 }
 
 cmd_gen_tls() {
@@ -150,6 +152,7 @@ cmd_prepare_config() {
   sed -i.bak "s|VAULT_CLUSTER_ADDR_PLACEHOLDER|${scheme}://${fqdn}:${VAULT_CLUSTER_PORT:-8201}|g" config/vault.hcl
   sed -i.bak "s|TLS_DISABLE_PLACEHOLDER|${tls_disable}|g" config/vault.hcl
   sed -i.bak "s|LOG_LEVEL_PLACEHOLDER|${log_level}|g" config/vault.hcl
+  sed -i.bak "s|VAULT_NODE_ID_PLACEHOLDER|${VAULT_NODE_ID:-vault-1}|g" config/vault.hcl
 
   if [ "$unseal" = "awskms" ]; then
     sed -i.bak "s|AWS_REGION_PLACEHOLDER|${AWS_REGION:-us-east-1}|g" config/vault.hcl
@@ -391,6 +394,115 @@ cmd_status() {
   echo ""
 }
 
+cmd_backup() {
+  local addr
+  addr="$(vault_addr)"
+  local backup_dir="backups"
+  local timestamp
+  timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_file="${backup_dir}/vault-backup-${timestamp}.snap"
+
+  mkdir -p "$backup_dir"
+
+  # Check Vault is unsealed
+  local sealed
+  sealed=$(curl_vault "${addr}/v1/sys/seal-status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sealed','unknown'))" 2>/dev/null || echo "unknown")
+  if [ "$sealed" != "False" ] && [ "$sealed" != "false" ]; then
+    error "Vault is sealed or unreachable. Cannot create snapshot."
+    exit 1
+  fi
+
+  # Get token
+  local vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ]; then
+    echo -n "Enter Vault token (root or with sys/storage/raft/snapshot access): "
+    read -r -s vault_token
+    echo ""
+  fi
+
+  info "Creating Raft snapshot..."
+  local http_code
+  http_code=$(curl_vault -X GET \
+    -H "X-Vault-Token: ${vault_token}" \
+    -o "${backup_file}" \
+    -w "%{http_code}" \
+    "${addr}/v1/sys/storage/raft/snapshot" 2>/dev/null)
+
+  if [ "$http_code" = "200" ] && [ -s "$backup_file" ]; then
+    local size
+    size=$(du -h "$backup_file" | cut -f1)
+    ok "Snapshot saved: ${backup_file} (${size})"
+    info "To restore: ./setup.sh restore ${backup_file}"
+  else
+    rm -f "$backup_file"
+    error "Snapshot failed (HTTP ${http_code}). Check your token permissions."
+    error "Required policy: path \"sys/storage/raft/snapshot\" { capabilities = [\"read\"] }"
+    exit 1
+  fi
+}
+
+cmd_restore() {
+  local snapshot_file="${2:-}"
+  if [ -z "$snapshot_file" ]; then
+    error "Usage: ./setup.sh restore <snapshot-file>"
+    error "Example: ./setup.sh restore backups/vault-backup-20250215_120000.snap"
+    exit 1
+  fi
+
+  if [ ! -f "$snapshot_file" ]; then
+    error "Snapshot file not found: ${snapshot_file}"
+    exit 1
+  fi
+
+  local addr
+  addr="$(vault_addr)"
+
+  # Check Vault is unsealed
+  local sealed
+  sealed=$(curl_vault "${addr}/v1/sys/seal-status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sealed','unknown'))" 2>/dev/null || echo "unknown")
+  if [ "$sealed" != "False" ] && [ "$sealed" != "false" ]; then
+    error "Vault is sealed or unreachable. Unseal first, then restore."
+    exit 1
+  fi
+
+  # Get token
+  local vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ]; then
+    echo -n "Enter Vault token (root or with sys/storage/raft/snapshot access): "
+    read -r -s vault_token
+    echo ""
+  fi
+
+  local size
+  size=$(du -h "$snapshot_file" | cut -f1)
+  warn "This will OVERWRITE all Vault data with snapshot: ${snapshot_file} (${size})"
+  echo -n "Are you sure? (yes/no): "
+  read -r confirm
+  if [ "$confirm" != "yes" ]; then
+    info "Restore cancelled."
+    return
+  fi
+
+  info "Restoring from Raft snapshot..."
+  local http_code
+  http_code=$(curl_vault -X POST \
+    -H "X-Vault-Token: ${vault_token}" \
+    --data-binary @"${snapshot_file}" \
+    -o /dev/null \
+    -w "%{http_code}" \
+    "${addr}/v1/sys/storage/raft/snapshot" 2>/dev/null)
+
+  if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+    ok "Snapshot restored successfully!"
+    warn "Vault will restart automatically. You may need to unseal again (Shamir mode)."
+    info "Run: ./setup.sh status"
+  else
+    error "Restore failed (HTTP ${http_code}). Check your token permissions."
+    error "Required policy: path \"sys/storage/raft/snapshot\" { capabilities = [\"create\", \"update\"] }"
+    exit 1
+  fi
+}
+
 cmd_all() {
   echo -e "${YELLOW}=== Full Deployment ===${NC}\n"
   load_env
@@ -436,6 +548,8 @@ cmd_help() {
   echo "  vault-unseal    Unseal Vault (Shamir mode)"
   echo "  register-plugin Register and enable the crypto plugin"
   echo "  status          Show Vault and plugin status"
+  echo "  backup          Create a Raft snapshot backup (online, no downtime)"
+  echo "  restore         Restore Vault from a Raft snapshot"
   echo "  all             Run full first-time deployment"
   echo "  help            Show this help message"
 }
@@ -466,6 +580,8 @@ case "$COMMAND" in
   vault-unseal)    cmd_vault_unseal ;;
   register-plugin) cmd_register_plugin ;;
   status)          cmd_status ;;
+  backup)          cmd_backup ;;
+  restore)         cmd_restore "$@" ;;
   all)             cmd_all ;;
   help)            cmd_help ;;
   *)
