@@ -1,0 +1,44 @@
+services:
+  vault:
+    image: hashicorp/vault:${VAULT_VERSION:-1.21}
+    container_name: ${VAULT_CONTAINER_NAME:-vault-ha-1}
+    restart: unless-stopped
+    ports:
+      - "${VAULT_PORT:-8200}:8200"
+      - "${VAULT_CLUSTER_PORT:-8201}:8201"
+    environment:
+      VAULT_ADDR: "https://127.0.0.1:8200"
+      VAULT_CACERT: "/vault/config/tls/ca.pem"
+      # AWS KMS credentials (only needed for awskms unseal method)
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_REGION: "${AWS_REGION:-}"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      # Persistent data storage (Raft)
+      - vault-data:/vault/data
+      # Vault HCL configuration (read-only)
+      - ./config:/vault/config:ro
+      # TLS certificates (read-only)
+      - ./tls:/vault/config/tls:ro
+      # Plugin binaries (read-only)
+      - ./plugins:/vault/plugins:ro
+      # Audit logs
+      - ./logs:/vault/logs
+    command: vault server -config=/vault/config/vault.hcl
+    healthcheck:
+      test: ["CMD-SHELL", "vault status -tls-skip-verify 2>&1 || [ $$? -eq 2 ]"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  vault-data:
+    name: ${VAULT_DATA_VOLUME:-vault-ha-data-1}

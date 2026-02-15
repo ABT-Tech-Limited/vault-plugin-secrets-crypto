@@ -60,6 +60,16 @@ deploy/.env
 deploy/tls/
 deploy/config/
 deploy/logs/
+deploy/backups/
 deploy/vault-init-keys.json
+
+# HA deployment secrets
+deploy_ha/.env
+deploy_ha/tls/
+deploy_ha/config/
+deploy_ha/logs/
+deploy_ha/backups/
+deploy_ha/plugins/
+deploy_ha/vault-init-keys.json
 
 .claude
