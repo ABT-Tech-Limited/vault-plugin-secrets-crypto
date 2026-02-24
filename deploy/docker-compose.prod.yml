@@ -20,13 +20,17 @@ services:
       - ./data:/vault/data
       # Vault HCL configuration (entrypoint needs chown for vault user)
       - ./config:/vault/config
-      # TLS certificates (read-only)
-      - ./tls:/vault/tls:ro
+      # TLS certificates
+      - ./tls:/vault/tls
       # Plugin binaries (read-only)
       - ../build:/vault/plugins:ro
       # Audit logs
       - ./logs:/vault/logs
-    command: vault server -config=/vault/config/vault.hcl
+    # Chown bind-mounted dirs (data, tls) that the default entrypoint does not handle,
+    # then delegate to the original entrypoint which chowns config/logs and drops to vault user.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - chown -R vault:vault /vault/data /vault/tls && exec docker-entrypoint.sh vault server -config=/vault/config/vault.hcl
     healthcheck:
       test: ["CMD-SHELL", "vault status -tls-skip-verify 2>&1 || [ $$? -eq 2 ]"]
       interval: 30s

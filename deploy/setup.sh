@@ -500,18 +500,6 @@ cmd_prepare_config() {
 
 cmd_start() {
   info "Starting Vault container..."
-
-  # Fix bind-mounted directory ownership for the vault user (UID 100, GID 1000).
-  # The official Vault entrypoint only chowns /vault/logs, /vault/file, /vault/config
-  # but NOT /vault/data or /vault/tls. Use alpine (no entrypoint interference) to
-  # chown all bind-mounted dirs before starting the Vault container.
-  info "Fixing bind-mount ownership for vault user (UID 100)..."
-  docker run --rm \
-    -v "$(pwd)/data:/mnt/data" \
-    -v "$(pwd)/tls:/mnt/tls" \
-    -v "$(pwd)/logs:/mnt/logs" \
-    alpine chown -R 100:1000 /mnt/data /mnt/tls /mnt/logs 2>/dev/null || true
-
   docker compose -f docker-compose.prod.yml --env-file .env up -d
   ok "Vault container started"
   info "Waiting for Vault to be ready..."
