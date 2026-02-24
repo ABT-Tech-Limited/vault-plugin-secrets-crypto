@@ -18,8 +18,8 @@ services:
     volumes:
       # Persistent data storage
       - vault-data:/vault/data
-      # Vault HCL configuration (read-only)
-      - ./config:/vault/config:ro
+      # Vault HCL configuration (entrypoint needs chown for vault user)
+      - ./config:/vault/config
       # TLS certificates (read-only)
       - ./tls:/vault/tls:ro
       # Plugin binaries (read-only)
