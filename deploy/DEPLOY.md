@@ -3,6 +3,7 @@
 ## 目录
 
 - [前置条件](#前置条件)
+- [依赖检测与安装](#依赖检测与安装)
 - [架构概述](#架构概述)
 - [目录结构](#目录结构)
 - [快速部署](#快速部署)
@@ -25,6 +26,7 @@
 |------|---------|------|
 | Docker Engine | 20.10+ | 容器运行时 |
 | Docker Compose | V2 | 使用 `docker compose` 命令 |
+| Go | 见 `go.mod` | 编译插件二进制，可在 `.env` 中通过 `GO_VERSION` 指定 |
 | openssl | - | TLS 证书生成 |
 | curl | - | API 调用 |
 | python3 | 3.6+ | JSON 解析（setup.sh 使用） |
@@ -34,6 +36,56 @@
 - `jq` — JSON 格式化输出
 - Vault CLI — 直接命令行操作
 - AWS CLI — AWS KMS 密钥管理（方案 B）
+
+---
+
+## 依赖检测与安装
+
+部署脚本提供了自动检测和安装依赖的功能，包括 Docker、Go（可指定版本）、openssl、curl、python3、jq 等。
+
+### 检测依赖
+
+```bash
+./setup.sh check-deps
+```
+
+输出示例：
+
+```
+[INFO] Checking dependencies...
+[OK] Docker: 27.5.1
+[OK] Docker Compose: 2.32.4
+[OK] OpenSSL: 3.4.1
+[OK] curl: 8.12.1
+[OK] Python3: 3.13.2
+[OK] Go: 1.25.5 (required: 1.25.5)
+[OK] jq: 1.7.1 (optional)
+
+[OK] All required dependencies are satisfied.
+```
+
+### 一键安装缺失依赖
+
+```bash
+./setup.sh install-deps
+```
+
+该命令会：
+1. 自动检测操作系统和 CPU 架构（Linux/macOS, amd64/arm64）
+2. 识别包管理器（apt/yum/dnf/pacman/brew）
+3. 安装所有缺失的依赖
+4. 对于 Go，从官方下载指定版本并安装到 `/usr/local/go`
+
+### 指定 Go 版本
+
+Go 版本优先级：`.env` 中的 `GO_VERSION` > 项目根目录 `go.mod` 中的版本声明。
+
+```bash
+# .env
+GO_VERSION=1.25.5
+```
+
+> **注意：** `install-deps` 在 Linux 上安装 Docker 和 Go 时可能需要 `sudo` 权限。
 
 ---
 
@@ -114,23 +166,26 @@ deploy/
 **Shamir 解封（最简方式）：**
 
 ```bash
-# 1. 构建插件
-make build
-
-# 2. 进入 deploy 目录并配置
+# 1. 进入 deploy 目录，检测并安装依赖
 cd deploy
+./setup.sh install-deps
+
+# 2. 配置环境变量
 cp .env.example .env
 # 编辑 .env，至少修改 VAULT_FQDN
 
-# 3. 一键部署
+# 3. 构建插件（需要 Go）
+cd .. && make build && cd deploy
+
+# 4. 一键部署
 ./setup.sh all
 ```
 
 **AWS KMS 解封：**
 
 ```bash
-make build
 cd deploy
+./setup.sh install-deps
 cp .env.example .env
 # 编辑 .env：
 #   UNSEAL_METHOD=awskms
@@ -139,6 +194,7 @@ cp .env.example .env
 #   AWS_REGION=us-east-1
 #   AWS_KMS_KEY_ID=xxx
 
+cd .. && make build && cd deploy
 ./setup.sh all
 ```
 

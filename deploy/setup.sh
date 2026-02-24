@@ -4,6 +4,8 @@
 # Usage: ./setup.sh <command>
 #
 # Commands:
+#   check-deps      Check required dependencies
+#   install-deps    Install missing dependencies (Docker, Go, openssl, etc.)
 #   init-dirs       Create required directory structure
 #   gen-tls         Generate self-signed TLS certificates (testing only)
 #   prepare-config  Generate vault.hcl from .env settings
@@ -71,6 +73,307 @@ curl_vault() {
 }
 
 # ==================== Commands ====================
+
+# Detect OS and architecture
+detect_os() {
+  local os arch
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64)  arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+  esac
+  echo "${os} ${arch}"
+}
+
+# Get required Go version (from .env or go.mod)
+required_go_version() {
+  local ver="${GO_VERSION:-}"
+  if [ -z "$ver" ] && [ -f ../go.mod ]; then
+    ver=$(grep '^go ' ../go.mod | awk '{print $2}')
+  fi
+  echo "${ver:-}"
+}
+
+# Compare semver: returns 0 if $1 >= $2
+version_gte() {
+  [ "$(printf '%s\n%s' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+}
+
+cmd_check_deps() {
+  info "Checking dependencies..."
+  local missing=0
+
+  # Docker
+  if command -v docker &>/dev/null; then
+    local docker_ver
+    docker_ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+    ok "Docker: ${docker_ver}"
+  else
+    error "Docker: not found"
+    missing=$((missing + 1))
+  fi
+
+  # Docker Compose V2
+  if docker compose version &>/dev/null; then
+    local compose_ver
+    compose_ver=$(docker compose version --short 2>/dev/null || echo "unknown")
+    ok "Docker Compose: ${compose_ver}"
+  else
+    error "Docker Compose V2: not found"
+    missing=$((missing + 1))
+  fi
+
+  # openssl
+  if command -v openssl &>/dev/null; then
+    local ssl_ver
+    ssl_ver=$(openssl version 2>/dev/null | awk '{print $2}')
+    ok "OpenSSL: ${ssl_ver}"
+  else
+    error "OpenSSL: not found"
+    missing=$((missing + 1))
+  fi
+
+  # curl
+  if command -v curl &>/dev/null; then
+    local curl_ver
+    curl_ver=$(curl --version 2>/dev/null | head -1 | awk '{print $2}')
+    ok "curl: ${curl_ver}"
+  else
+    error "curl: not found"
+    missing=$((missing + 1))
+  fi
+
+  # python3
+  if command -v python3 &>/dev/null; then
+    local py_ver
+    py_ver=$(python3 --version 2>/dev/null | awk '{print $2}')
+    ok "Python3: ${py_ver}"
+  else
+    error "Python3: not found"
+    missing=$((missing + 1))
+  fi
+
+  # Go
+  local required_go
+  required_go=$(required_go_version)
+  if command -v go &>/dev/null; then
+    local go_ver
+    go_ver=$(go version 2>/dev/null | awk '{print $3}' | sed 's/go//')
+    if [ -n "$required_go" ]; then
+      if version_gte "$go_ver" "$required_go"; then
+        ok "Go: ${go_ver} (required: ${required_go})"
+      else
+        warn "Go: ${go_ver} (required: ${required_go}, upgrade needed)"
+        missing=$((missing + 1))
+      fi
+    else
+      ok "Go: ${go_ver}"
+    fi
+  else
+    if [ -n "$required_go" ]; then
+      error "Go: not found (required: ${required_go})"
+    else
+      error "Go: not found"
+    fi
+    missing=$((missing + 1))
+  fi
+
+  # jq (optional)
+  if command -v jq &>/dev/null; then
+    local jq_ver
+    jq_ver=$(jq --version 2>/dev/null | sed 's/jq-//')
+    ok "jq: ${jq_ver} (optional)"
+  else
+    warn "jq: not found (optional, for JSON formatting)"
+  fi
+
+  echo ""
+  if [ "$missing" -gt 0 ]; then
+    error "${missing} required dependency(ies) missing."
+    info "Run './setup.sh install-deps' to install them automatically."
+    return 1
+  else
+    ok "All required dependencies are satisfied."
+  fi
+}
+
+cmd_install_deps() {
+  info "Installing missing dependencies..."
+  local read_pair
+  read_pair=$(detect_os)
+  local os arch
+  os=$(echo "$read_pair" | awk '{print $1}')
+  arch=$(echo "$read_pair" | awk '{print $2}')
+  info "Detected OS: ${os}, Arch: ${arch}"
+
+  # Detect package manager
+  local pkg_mgr=""
+  if [ "$os" = "darwin" ]; then
+    if command -v brew &>/dev/null; then
+      pkg_mgr="brew"
+    else
+      error "Homebrew not found. Install from https://brew.sh"
+      exit 1
+    fi
+  elif [ "$os" = "linux" ]; then
+    if command -v apt-get &>/dev/null; then
+      pkg_mgr="apt"
+    elif command -v yum &>/dev/null; then
+      pkg_mgr="yum"
+    elif command -v dnf &>/dev/null; then
+      pkg_mgr="dnf"
+    elif command -v pacman &>/dev/null; then
+      pkg_mgr="pacman"
+    else
+      error "No supported package manager found (apt/yum/dnf/pacman)."
+      exit 1
+    fi
+  else
+    error "Unsupported OS: ${os}"
+    exit 1
+  fi
+  info "Package manager: ${pkg_mgr}"
+  echo ""
+
+  # Install Docker
+  if ! command -v docker &>/dev/null; then
+    info "Installing Docker..."
+    case "$pkg_mgr" in
+      brew)
+        brew install --cask docker
+        warn "Start Docker Desktop manually after installation."
+        ;;
+      apt)
+        curl -fsSL https://get.docker.com | sh
+        sudo systemctl enable --now docker
+        sudo usermod -aG docker "$USER"
+        warn "Log out and back in for docker group to take effect."
+        ;;
+      yum|dnf)
+        curl -fsSL https://get.docker.com | sh
+        sudo systemctl enable --now docker
+        sudo usermod -aG docker "$USER"
+        warn "Log out and back in for docker group to take effect."
+        ;;
+      pacman)
+        sudo pacman -S --noconfirm docker docker-compose
+        sudo systemctl enable --now docker
+        sudo usermod -aG docker "$USER"
+        ;;
+    esac
+    ok "Docker installed."
+  fi
+
+  # Install openssl
+  if ! command -v openssl &>/dev/null; then
+    info "Installing OpenSSL..."
+    case "$pkg_mgr" in
+      brew)    brew install openssl ;;
+      apt)     sudo apt-get install -y openssl ;;
+      yum|dnf) sudo "$pkg_mgr" install -y openssl ;;
+      pacman)  sudo pacman -S --noconfirm openssl ;;
+    esac
+    ok "OpenSSL installed."
+  fi
+
+  # Install curl
+  if ! command -v curl &>/dev/null; then
+    info "Installing curl..."
+    case "$pkg_mgr" in
+      brew)    brew install curl ;;
+      apt)     sudo apt-get install -y curl ;;
+      yum|dnf) sudo "$pkg_mgr" install -y curl ;;
+      pacman)  sudo pacman -S --noconfirm curl ;;
+    esac
+    ok "curl installed."
+  fi
+
+  # Install python3
+  if ! command -v python3 &>/dev/null; then
+    info "Installing Python3..."
+    case "$pkg_mgr" in
+      brew)    brew install python3 ;;
+      apt)     sudo apt-get install -y python3 ;;
+      yum|dnf) sudo "$pkg_mgr" install -y python3 ;;
+      pacman)  sudo pacman -S --noconfirm python ;;
+    esac
+    ok "Python3 installed."
+  fi
+
+  # Install jq
+  if ! command -v jq &>/dev/null; then
+    info "Installing jq..."
+    case "$pkg_mgr" in
+      brew)    brew install jq ;;
+      apt)     sudo apt-get install -y jq ;;
+      yum|dnf) sudo "$pkg_mgr" install -y jq ;;
+      pacman)  sudo pacman -S --noconfirm jq ;;
+    esac
+    ok "jq installed."
+  fi
+
+  # Install Go
+  local required_go
+  required_go=$(required_go_version)
+  local need_go=false
+
+  if ! command -v go &>/dev/null; then
+    need_go=true
+  elif [ -n "$required_go" ]; then
+    local current_go
+    current_go=$(go version 2>/dev/null | awk '{print $3}' | sed 's/go//')
+    if ! version_gte "$current_go" "$required_go"; then
+      need_go=true
+    fi
+  fi
+
+  if [ "$need_go" = "true" ] && [ -n "$required_go" ]; then
+    info "Installing Go ${required_go}..."
+    local go_archive="go${required_go}.${os}-${arch}.tar.gz"
+    local go_url="https://go.dev/dl/${go_archive}"
+
+    if [ "$os" = "darwin" ]; then
+      # macOS: use the pkg installer for cleaner installation
+      local go_pkg="go${required_go}.${os}-${arch}.pkg"
+      local go_pkg_url="https://go.dev/dl/${go_pkg}"
+      info "Downloading ${go_pkg_url}..."
+      curl -fSL -o "/tmp/${go_pkg}" "$go_pkg_url"
+      sudo installer -pkg "/tmp/${go_pkg}" -target /
+      rm -f "/tmp/${go_pkg}"
+    else
+      # Linux: download and extract to /usr/local
+      info "Downloading ${go_url}..."
+      curl -fSL -o "/tmp/${go_archive}" "$go_url"
+      sudo rm -rf /usr/local/go
+      sudo tar -C /usr/local -xzf "/tmp/${go_archive}"
+      rm -f "/tmp/${go_archive}"
+
+      # Ensure /usr/local/go/bin is in PATH
+      if ! echo "$PATH" | grep -q "/usr/local/go/bin"; then
+        warn "Add Go to your PATH by adding this to ~/.bashrc or ~/.zshrc:"
+        warn '  export PATH=$PATH:/usr/local/go/bin'
+        export PATH=$PATH:/usr/local/go/bin
+      fi
+    fi
+
+    # Verify
+    if command -v go &>/dev/null; then
+      local installed_ver
+      installed_ver=$(go version 2>/dev/null | awk '{print $3}' | sed 's/go//')
+      ok "Go ${installed_ver} installed."
+    else
+      error "Go installation completed but 'go' not found in PATH."
+      warn "You may need to open a new terminal or add /usr/local/go/bin to PATH."
+    fi
+  elif [ "$need_go" = "true" ]; then
+    warn "Go version not specified. Set GO_VERSION in .env or ensure go.mod exists."
+  fi
+
+  echo ""
+  info "Running dependency check..."
+  cmd_check_deps
+}
 
 cmd_init_dirs() {
   info "Creating directory structure..."
@@ -507,6 +810,9 @@ cmd_all() {
   echo -e "${YELLOW}=== Full Deployment ===${NC}\n"
   load_env
 
+  cmd_check_deps || { error "Please install missing dependencies first: ./setup.sh install-deps"; exit 1; }
+  echo ""
+
   cmd_init_dirs
   echo ""
 
@@ -539,6 +845,8 @@ cmd_help() {
   echo "Usage: $0 <command>"
   echo ""
   echo "Commands:"
+  echo "  check-deps      Check required dependencies"
+  echo "  install-deps    Install missing dependencies (Docker, Go, openssl, etc.)"
   echo "  init-dirs       Create required directory structure"
   echo "  gen-tls         Generate self-signed TLS certificates (testing only)"
   echo "  prepare-config  Generate vault.hcl from .env settings"
@@ -560,7 +868,7 @@ COMMAND="${1:-help}"
 
 # Load .env for most commands (except help and init-dirs)
 case "$COMMAND" in
-  help) ;;
+  help|check-deps|install-deps) ;;
   init-dirs)
     [ -f .env ] && load_env || true
     ;;
@@ -571,6 +879,8 @@ case "$COMMAND" in
 esac
 
 case "$COMMAND" in
+  check-deps)      cmd_check_deps ;;
+  install-deps)    cmd_install_deps ;;
   init-dirs)       cmd_init_dirs ;;
   gen-tls)         cmd_gen_tls ;;
   prepare-config)  cmd_prepare_config ;;
