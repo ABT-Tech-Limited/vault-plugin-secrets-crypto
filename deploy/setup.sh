@@ -739,11 +739,19 @@ cmd_create_admin() {
 
   # Step 1: Create crypto-admin policy
   info "Creating crypto-admin policy..."
-  local policy="path \"${mount_path}/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"list\"]\n}"
+  local policy_json
+  policy_json=$(python3 << PYEOF
+import json
+policy = """path "${mount_path}/*" {
+  capabilities = ["create", "read", "update", "list"]
+}"""
+print(json.dumps({"policy": policy}))
+PYEOF
+)
   local policy_result
   policy_result=$(curl_vault -X PUT \
     -H "X-Vault-Token: ${vault_token}" \
-    -d "{\"policy\":\"${policy}\"}" \
+    -d "${policy_json}" \
     "${addr}/v1/sys/policies/acl/crypto-admin")
 
   if echo "$policy_result" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'errors' in d else 1)" 2>/dev/null; then
