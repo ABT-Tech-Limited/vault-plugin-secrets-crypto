@@ -12,6 +12,7 @@
 - [方案 B：AWS KMS 自动解封](#方案-baws-kms-自动解封)
 - [Vault 初始化与解封](#vault-初始化与解封)
 - [插件注册与启用](#插件注册与启用)
+- [审计日志与访问策略](#审计日志与访问策略)
 - [健康检查与验证](#健康检查与验证)
 - [备份与恢复](#备份与恢复)
 - [安全加固清单](#安全加固清单)
@@ -22,17 +23,20 @@
 
 ## 前置条件
 
-| 依赖 | 最低版本 | 说明 |
-|------|---------|------|
-| Docker Engine | 20.10+ | 容器运行时 |
-| Docker Compose | V2 | 使用 `docker compose` 命令 |
-| Go | 见 `go.mod` | 编译插件二进制，可在 `.env` 中通过 `GO_VERSION` 指定 |
-| openssl | - | TLS 证书生成 |
-| curl | - | API 调用 |
-| python3 | 3.6+ | JSON 解析（setup.sh 使用） |
-| 磁盘空间 | 1GB+ | Vault 数据与日志存储 |
+
+| 依赖             | 最低版本       | 说明                                    |
+| -------------- | ---------- | ------------------------------------- |
+| Docker Engine  | 20.10+     | 容器运行时                                 |
+| Docker Compose | V2         | 使用 `docker compose` 命令                |
+| Go             | 见 `go.mod` | 编译插件二进制，可在 `.env` 中通过 `GO_VERSION` 指定 |
+| openssl        | -          | TLS 证书生成                              |
+| curl           | -          | API 调用                                |
+| python3        | 3.6+       | JSON 解析（setup.sh 使用）                  |
+| 磁盘空间           | 1GB+       | Vault 数据与日志存储                         |
+
 
 **可选依赖：**
+
 - `jq` — JSON 格式化输出
 - Vault CLI — 直接命令行操作
 - AWS CLI — AWS KMS 密钥管理（方案 B）
@@ -71,6 +75,7 @@
 ```
 
 该命令会：
+
 1. 自动检测操作系统和 CPU 架构（Linux/macOS, amd64/arm64）
 2. 识别包管理器（apt/yum/dnf/pacman/brew）
 3. 安装所有缺失的依赖
@@ -125,13 +130,15 @@ GO_VERSION=1.25.5
 
 **解封方式对比：**
 
-| 特性 | Shamir 密钥 | AWS KMS |
-|------|------------|---------|
-| 外部依赖 | 无 | AWS 账户 |
-| 重启后 | 需手动解封 | 自动解封 |
-| 密钥管理 | 自行分发保管 | AWS 托管 |
-| 适用场景 | 通用 | AWS 云环境 |
-| 成本 | 免费 | KMS API 调用费用 |
+
+| 特性   | Shamir 密钥 | AWS KMS      |
+| ---- | --------- | ------------ |
+| 外部依赖 | 无         | AWS 账户       |
+| 重启后  | 需手动解封     | 自动解封         |
+| 密钥管理 | 自行分发保管    | AWS 托管       |
+| 适用场景 | 通用        | AWS 云环境      |
+| 成本   | 免费        | KMS API 调用费用 |
+
 
 ---
 
@@ -218,11 +225,13 @@ cd .. && make build && cd deploy
 
 推荐使用 Let's Encrypt 或企业 CA 签发的证书，将以下文件放置到 `tls/` 目录：
 
-| 文件 | 说明 |
-|------|------|
-| `cert.pem` | 服务器证书（包含完整证书链） |
-| `key.pem` | 服务器私钥 |
-| `ca.pem` | CA 根证书（可选，用于客户端验证） |
+
+| 文件         | 说明                 |
+| ---------- | ------------------ |
+| `cert.pem` | 服务器证书（包含完整证书链）     |
+| `key.pem`  | 服务器私钥              |
+| `ca.pem`   | CA 根证书（可选，用于客户端验证） |
+
 
 ```bash
 # 设置文件权限
@@ -254,7 +263,7 @@ KEY_SHARES=5      # 密钥总份额数
 KEY_THRESHOLD=3   # 解封所需最少份额数
 ```
 
-2. 生成配置：
+1. 生成配置：
 
 ```bash
 ./setup.sh prepare-config
@@ -349,6 +358,7 @@ curl -s --cacert tls/ca.pem -X POST \
 ```
 
 初始化输出包含：
+
 - **Unseal Keys**（Shamir 方式）或 **Recovery Keys**（AWS KMS 方式）
 - **Root Token**
 
@@ -441,6 +451,57 @@ vault secrets list -detailed
 
 ---
 
+## 审计日志与访问策略
+
+> **自动化说明：** 使用 `./setup.sh all` 部署时，以下操作会在插件注册后自动执行。也可单独运行。
+
+### 审计日志
+
+部署脚本自动启用文件审计日志，记录所有 Vault API 请求和响应：
+
+```bash
+# 单独启用（需要 Root Token 或 vault-init-keys.json）
+./setup.sh enable-audit
+```
+
+日志文件位于容器内 `/vault/logs/audit.log`，通过 Docker Volume 持久化到宿主机 `logs/` 目录。
+
+### crypto-admin 策略与 Token
+
+部署完成后，脚本自动创建 `crypto-admin` 策略和对应的 Orphan Token：
+
+```hcl
+# crypto-admin 策略
+path "crypto/*" {
+  capabilities = ["create", "read", "update", "list"]
+}
+```
+
+Token 保存在 `crypto-admin-token` 文件（权限 600），使用方式：
+
+```bash
+# 读取 admin token
+export VAULT_TOKEN=$(cat crypto-admin-token)
+
+# 使用 admin token 操作插件
+vault write crypto/keys curve=secp256k1 name=my-key
+vault list crypto/keys
+```
+
+单独创建 admin token：
+
+```bash
+./setup.sh create-admin
+```
+
+> **安全建议：**
+>
+> - `crypto-admin-token` 是 Orphan Token（不依赖 Root Token 生命周期），生产环境应安全存储后从服务器删除
+> - Root Token 仅用于初始化配置，完成后应撤销：`vault token revoke <root-token>`
+> - 根据实际需求创建更细粒度的策略（如 `crypto-readonly`、`crypto-signer`），参考[附录](#vault-策略示例)
+
+---
+
 ## 健康检查与验证
 
 ### Vault 状态
@@ -458,12 +519,14 @@ vault status
 
 **健康检查返回码：**
 
-| HTTP 状态码 | 含义 |
-|------------|------|
-| 200 | 正常（已初始化、已解封、Active） |
-| 429 | Standby 节点 |
-| 501 | 未初始化 |
-| 503 | 已密封 |
+
+| HTTP 状态码 | 含义                  |
+| -------- | ------------------- |
+| 200      | 正常（已初始化、已解封、Active） |
+| 429      | Standby 节点          |
+| 501      | 未初始化                |
+| 503      | 已密封                 |
+
 
 ### 功能测试
 
@@ -537,19 +600,19 @@ make deploy-restore SNAPSHOT=backups/vault-backup-20250215_120000.snap
 
 ## 安全加固清单
 
-- [ ] 启用 TLS（禁止生产环境使用 HTTP）
-- [ ] 使用 TLS 1.2+，禁用弱密码套件
-- [ ] 初始化完成后撤销 Root Token：`vault token revoke <root-token>`
-- [ ] 配置 Vault 策略（最小权限），参考[附录](#vault-策略示例)
-- [ ] 启用审计日志：`vault audit enable file file_path=/vault/logs/audit.log`
-- [ ] 限制网络访问（防火墙仅允许必要端口和 IP）
-- [ ] 定期轮换 TLS 证书
-- [ ] Unseal Keys 分散保管（不同人、不同地点）
-- [ ] 定期备份 Vault 数据
-- [ ] Docker Socket 权限控制（限制可访问 Docker 的用户）
-- [ ] 文件权限审查：配置文件 600，目录 700
-- [ ] 监控 Vault 状态（Prometheus + Grafana）
-- [ ] 设置日志告警（Vault 密封事件、认证失败等）
+- 启用 TLS（禁止生产环境使用 HTTP）
+- 使用 TLS 1.2+，禁用弱密码套件
+- 初始化完成后撤销 Root Token：`vault token revoke <root-token>`
+- 配置 Vault 策略（最小权限）— `./setup.sh all` 自动创建 `crypto-admin` 策略
+- 启用审计日志 — `./setup.sh all` 自动启用文件审计
+- 限制网络访问（防火墙仅允许必要端口和 IP）
+- 定期轮换 TLS 证书
+- Unseal Keys 分散保管（不同人、不同地点）
+- 定期备份 Vault 数据
+- Docker Socket 权限控制（限制可访问 Docker 的用户）
+- 文件权限审查：配置文件 600，目录 700
+- 监控 Vault 状态（Prometheus + Grafana）
+- 设置日志告警（Vault 密封事件、认证失败等）
 
 ---
 
@@ -617,14 +680,16 @@ docker compose -f docker-compose.prod.yml logs vault | grep -i kms
 
 ### 常见错误码
 
-| 错误 | 可能原因 | 解决方案 |
-|------|---------|---------|
-| `permission denied` | 文件权限问题 | `chmod 600` 配置/证书文件 |
-| `plugin not found` | 插件未注册或 SHA256 不匹配 | 重新注册插件 |
-| `connection refused` | Vault 未运行 | `./setup.sh start` |
-| `certificate signed by unknown authority` | CA 不受信任 | 使用 `--cacert` 或 `-k` |
-| `server is not yet initialized` | Vault 未初始化 | `./setup.sh vault-init` |
-| `Vault is sealed` | Vault 需要解封 | `./setup.sh vault-unseal` |
+
+| 错误                                        | 可能原因              | 解决方案                      |
+| ----------------------------------------- | ----------------- | ------------------------- |
+| `permission denied`                       | 文件权限问题            | `chmod 600` 配置/证书文件       |
+| `plugin not found`                        | 插件未注册或 SHA256 不匹配 | 重新注册插件                    |
+| `connection refused`                      | Vault 未运行         | `./setup.sh start`        |
+| `certificate signed by unknown authority` | CA 不受信任           | 使用 `--cacert` 或 `-k`      |
+| `server is not yet initialized`           | Vault 未初始化        | `./setup.sh vault-init`   |
+| `Vault is sealed`                         | Vault 需要解封        | `./setup.sh vault-unseal` |
+
 
 ---
 
@@ -681,6 +746,8 @@ vault token create -policy=crypto-signer -ttl=24h
 ```
 
 ### 启用审计日志
+
+> 注意：`./setup.sh all` 已自动启用审计日志。以下为手动操作参考。
 
 ```bash
 vault audit enable file file_path=/vault/logs/audit.log
@@ -758,3 +825,4 @@ make deploy-stop
 make deploy-logs
 make deploy-status
 ```
+

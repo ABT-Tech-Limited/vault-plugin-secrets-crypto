@@ -72,6 +72,27 @@ curl_vault() {
   curl -s "${extra_args[@]}" "$@"
 }
 
+# Read root token from vault-init-keys.json (or prompt interactively)
+read_root_token() {
+  local token="${1:-}"
+  if [ -n "$token" ]; then
+    echo "$token"
+    return
+  fi
+  if [ -f vault-init-keys.json ]; then
+    token=$(python3 -c "import sys,json; print(json.load(open('vault-init-keys.json')).get('root_token',''))" 2>/dev/null || echo "")
+    if [ -n "$token" ]; then
+      echo "$token"
+      return
+    fi
+  fi
+  # Fallback: interactive prompt
+  echo -n "Enter Vault root token: " >&2
+  read -r -s token
+  echo "" >&2
+  echo "$token"
+}
+
 # ==================== Commands ====================
 
 # Detect OS and architecture
@@ -611,10 +632,9 @@ cmd_register_plugin() {
   local plugin_binary="${plugin_name}-${plugin_version}"
   local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
 
-  # Get root token
-  echo -n "Enter Vault root token: "
-  read -r -s vault_token
-  echo ""
+  # Get root token (from argument, file, or interactive prompt)
+  local vault_token
+  vault_token=$(read_root_token "${1:-}")
 
   # Calculate SHA256
   info "Calculating plugin SHA256..."
@@ -661,6 +681,95 @@ cmd_register_plugin() {
   local mounted_version
   mounted_version=$(echo "$tune_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('plugin_version','unknown'))" 2>/dev/null || echo "unknown")
   ok "Mounted plugin version: ${mounted_version}"
+}
+
+cmd_enable_audit() {
+  local addr
+  addr="$(vault_addr)"
+
+  local vault_token
+  vault_token=$(read_root_token "${1:-}")
+
+  info "Enabling file audit log..."
+  local result
+  result=$(curl_vault -X PUT \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d '{"type":"file","options":{"file_path":"/vault/logs/audit.log"}}' \
+    "${addr}/v1/sys/audit/file")
+
+  # Empty response = success; check for errors
+  if echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'errors' in d else 1)" 2>/dev/null; then
+    # Check if already enabled
+    if echo "$result" | grep -q "already registered"; then
+      warn "Audit log already enabled"
+    else
+      error "Failed to enable audit log:"
+      echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
+      exit 1
+    fi
+  else
+    ok "Audit log enabled at /vault/logs/audit.log"
+  fi
+}
+
+cmd_create_admin() {
+  local addr
+  addr="$(vault_addr)"
+  local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
+
+  local vault_token
+  vault_token=$(read_root_token "${1:-}")
+
+  # Step 1: Create crypto-admin policy
+  info "Creating crypto-admin policy..."
+  local policy="path \"${mount_path}/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"list\"]\n}"
+  local policy_result
+  policy_result=$(curl_vault -X PUT \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "{\"policy\":\"${policy}\"}" \
+    "${addr}/v1/sys/policies/acl/crypto-admin")
+
+  if echo "$policy_result" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'errors' in d else 1)" 2>/dev/null; then
+    error "Failed to create crypto-admin policy:"
+    echo "$policy_result" | python3 -m json.tool 2>/dev/null || echo "$policy_result"
+    exit 1
+  fi
+  ok "Policy crypto-admin created"
+
+  # Step 2: Create orphan token with crypto-admin policy
+  info "Creating crypto-admin token..."
+  local token_result
+  token_result=$(curl_vault -X POST \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d '{"policies":["crypto-admin"],"display_name":"crypto-admin","no_parent":true,"renewable":true}' \
+    "${addr}/v1/auth/token/create-orphan")
+
+  local admin_token
+  admin_token=$(echo "$token_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('client_token',''))" 2>/dev/null || echo "")
+
+  if [ -z "$admin_token" ]; then
+    error "Failed to create crypto-admin token:"
+    echo "$token_result" | python3 -m json.tool 2>/dev/null || echo "$token_result"
+    exit 1
+  fi
+
+  # Save token to file
+  echo "$admin_token" > crypto-admin-token
+  chmod 600 crypto-admin-token
+  ok "Token saved to crypto-admin-token"
+
+  echo ""
+  echo -e "${GREEN}===========================================================${NC}"
+  echo -e "${GREEN}  crypto-admin token created successfully${NC}"
+  echo -e "${GREEN}===========================================================${NC}"
+  echo -e "  Token:      ${admin_token}"
+  echo -e "  Policy:     crypto-admin (${mount_path}/* CRUD+List)"
+  echo -e "  Token file: crypto-admin-token"
+  echo ""
+  echo -e "  Usage:"
+  echo -e "    export VAULT_TOKEN=${admin_token}"
+  echo -e "    vault write ${mount_path}/keys curve=secp256k1 name=my-key"
+  echo -e "${GREEN}===========================================================${NC}"
 }
 
 cmd_status() {
@@ -842,7 +951,17 @@ cmd_all() {
   cmd_vault_unseal
   echo ""
 
-  cmd_register_plugin
+  # Read root token from vault-init-keys.json for automated operations
+  local root_token
+  root_token=$(read_root_token)
+
+  cmd_register_plugin "$root_token"
+  echo ""
+
+  cmd_enable_audit "$root_token"
+  echo ""
+
+  cmd_create_admin "$root_token"
   echo ""
 
   cmd_status
@@ -864,6 +983,8 @@ cmd_help() {
   echo "  vault-init      Initialize Vault (first time only)"
   echo "  vault-unseal    Unseal Vault (Shamir mode)"
   echo "  register-plugin Register and enable the crypto plugin"
+  echo "  enable-audit    Enable file audit logging"
+  echo "  create-admin    Create crypto-admin policy and token"
   echo "  status          Show Vault and plugin status"
   echo "  backup          Create a Raft snapshot backup (online, no downtime)"
   echo "  restore         Restore Vault from a Raft snapshot"
@@ -898,6 +1019,8 @@ case "$COMMAND" in
   vault-init)      cmd_vault_init ;;
   vault-unseal)    cmd_vault_unseal ;;
   register-plugin) cmd_register_plugin ;;
+  enable-audit)    cmd_enable_audit ;;
+  create-admin)    cmd_create_admin ;;
   status)          cmd_status ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "$@" ;;
