@@ -666,11 +666,21 @@ cmd_register_plugin() {
     "${addr}/v1/sys/mounts/${mount_path}")
 
   if echo "$enable_result" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'errors' in d else 1)" 2>/dev/null; then
-    error "Plugin enable failed:"
-    echo "$enable_result" | python3 -m json.tool 2>/dev/null || echo "$enable_result"
-    exit 1
+    if echo "$enable_result" | grep -q "existing mount at"; then
+      warn "Plugin already mounted at /${mount_path}, reloading..."
+      curl_vault -X PUT \
+        -H "X-Vault-Token: ${vault_token}" \
+        -d "{\"mounts\":[\"${mount_path}/\"]}" \
+        "${addr}/v1/sys/plugins/reload/backend" > /dev/null 2>&1
+      ok "Plugin reloaded"
+    else
+      error "Plugin enable failed:"
+      echo "$enable_result" | python3 -m json.tool 2>/dev/null || echo "$enable_result"
+      exit 1
+    fi
+  else
+    ok "Plugin enabled at /${mount_path}"
   fi
-  ok "Plugin enabled at /${mount_path}"
 
   # Verify
   info "Verifying plugin mount..."
@@ -716,6 +726,13 @@ cmd_create_admin() {
   local addr
   addr="$(vault_addr)"
   local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
+
+  # Skip if admin token already exists
+  if [ -f crypto-admin-token ]; then
+    warn "crypto-admin-token already exists, skipping token creation"
+    info "To recreate, delete crypto-admin-token and run: ./setup.sh create-admin"
+    return
+  fi
 
   local vault_token
   vault_token=$(read_root_token "${1:-}")
