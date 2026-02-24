@@ -433,14 +433,20 @@ cmd_gen_tls() {
   openssl req -new -x509 -days 36500 -key tls/ca-key.pem \
     -out tls/ca.pem -subj "/CN=Vault CA" 2>/dev/null
 
-  # Create SAN config
+  # Create SAN config (detect if fqdn is an IP address or hostname)
+  local san_entries="DNS:localhost,IP:127.0.0.1"
+  if echo "$fqdn" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    san_entries="IP:${fqdn},${san_entries}"
+  elif [ "$fqdn" != "localhost" ]; then
+    san_entries="DNS:${fqdn},${san_entries}"
+  fi
   cat > tls/_openssl.cnf <<EOF
 [req]
 distinguished_name = req_dn
 req_extensions = v3_req
 [req_dn]
 [v3_req]
-subjectAltName = DNS:${fqdn},DNS:localhost,IP:127.0.0.1
+subjectAltName = ${san_entries}
 EOF
 
   # Generate server key, CSR, and certificate
@@ -457,7 +463,7 @@ EOF
 
   ok "TLS certificates generated in tls/"
   info "  CA cert:     tls/ca.pem"
-  info "  Server cert: tls/cert.pem (SAN: ${fqdn}, localhost, 127.0.0.1)"
+  info "  Server cert: tls/cert.pem (SAN: ${san_entries})"
   info "  Server key:  tls/key.pem"
 }
 
