@@ -24,7 +24,9 @@ plugin_directory = "/vault/plugins"
 api_addr     = "VAULT_API_ADDR_PLACEHOLDER"
 cluster_addr = "VAULT_CLUSTER_ADDR_PLACEHOLDER"
 
-disable_mlock = false
+# Docker deployments: must be true so that plugin subprocesses can allocate memory.
+# The main vault binary gets IPC_LOCK via setcap, but plugins do not.
+disable_mlock = true
 
 log_level = "LOG_LEVEL_PLACEHOLDER"
 
