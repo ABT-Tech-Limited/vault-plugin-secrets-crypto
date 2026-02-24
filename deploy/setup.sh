@@ -349,12 +349,21 @@ cmd_install_deps() {
       sudo tar -C /usr/local -xzf "/tmp/${go_archive}"
       rm -f "/tmp/${go_archive}"
 
-      # Ensure /usr/local/go/bin is in PATH
-      if ! echo "$PATH" | grep -q "/usr/local/go/bin"; then
-        warn "Add Go to your PATH by adding this to ~/.bashrc or ~/.zshrc:"
-        warn '  export PATH=$PATH:/usr/local/go/bin'
-        export PATH=$PATH:/usr/local/go/bin
+      # Persist Go PATH for current user
+      local shell_rc=""
+      if [ -f "$HOME/.zshrc" ]; then
+        shell_rc="$HOME/.zshrc"
+      elif [ -f "$HOME/.bashrc" ]; then
+        shell_rc="$HOME/.bashrc"
+      elif [ -f "$HOME/.profile" ]; then
+        shell_rc="$HOME/.profile"
       fi
+
+      if [ -n "$shell_rc" ] && ! grep -q '/usr/local/go/bin' "$shell_rc" 2>/dev/null; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> "$shell_rc"
+        info "Added Go to PATH in ${shell_rc}"
+      fi
+      export PATH=$PATH:/usr/local/go/bin
     fi
 
     # Verify
