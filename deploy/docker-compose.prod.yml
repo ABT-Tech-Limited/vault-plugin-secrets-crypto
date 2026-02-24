@@ -16,8 +16,8 @@ services:
     cap_add:
       - IPC_LOCK
     volumes:
-      # Persistent data storage
-      - vault-data:/vault/data
+      # Persistent data storage (Raft + WAL)
+      - ./data:/vault/data
       # Vault HCL configuration (entrypoint needs chown for vault user)
       - ./config:/vault/config
       # TLS certificates (read-only)
@@ -38,7 +38,3 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-
-volumes:
-  vault-data:
-    name: ${VAULT_DATA_VOLUME:-vault-crypto-data}

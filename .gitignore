@@ -59,9 +59,11 @@ temp/
 deploy/.env
 deploy/tls/
 deploy/config/
+deploy/data/
 deploy/logs/
 deploy/backups/
 deploy/vault-init-keys.json
+deploy/crypto-admin-token
 
 # HA deployment secrets
 deploy_ha/.env

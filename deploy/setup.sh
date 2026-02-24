@@ -407,8 +407,8 @@ cmd_install_deps() {
 
 cmd_init_dirs() {
   info "Creating directory structure..."
-  mkdir -p config tls logs backups
-  chmod 700 config tls
+  mkdir -p config tls data logs backups
+  chmod 700 config tls data
 
   # Check plugin binary
   local plugin_binary="${PLUGIN_NAME:-vault-plugin-crypto}-${PLUGIN_VERSION:-v0.1.0}"
@@ -419,7 +419,7 @@ cmd_init_dirs() {
     ok "Plugin binary found: ../build/${plugin_binary}"
   fi
 
-  ok "Directories created: config/ tls/ logs/ backups/"
+  ok "Directories created: config/ tls/ data/ logs/ backups/"
 }
 
 cmd_gen_tls() {
