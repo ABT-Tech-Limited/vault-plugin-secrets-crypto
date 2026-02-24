@@ -500,6 +500,16 @@ cmd_prepare_config() {
 
 cmd_start() {
   info "Starting Vault container..."
+
+  # Fix data directory ownership for the vault user (UID 100) inside the container.
+  # The official Vault entrypoint only chowns /vault/logs, /vault/file, /vault/config
+  # but NOT /vault/data, so bind-mounted data dirs need manual ownership fix.
+  if [ -d data ]; then
+    info "Fixing data directory ownership for vault user (UID 100)..."
+    docker run --rm -v "$(pwd)/data:/vault/data" hashicorp/vault:${VAULT_VERSION:-1.21} \
+      chown -R vault:vault /vault/data 2>/dev/null || true
+  fi
+
   docker compose -f docker-compose.prod.yml --env-file .env up -d
   ok "Vault container started"
   info "Waiting for Vault to be ready..."
