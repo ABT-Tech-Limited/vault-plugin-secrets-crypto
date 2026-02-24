@@ -156,7 +156,7 @@ cp .env.example .env
 ./setup.sh gen-tls
 ```
 
-生成的证书有效期 365 天，SAN 包含 `VAULT_FQDN`、`localhost`、`127.0.0.1`。
+生成的证书有效期 100 年，SAN 包含 `VAULT_FQDN`、`localhost`、`127.0.0.1`。
 
 ### 生产环境：正式证书
 

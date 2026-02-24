@@ -97,7 +97,7 @@ cmd_gen_tls() {
 
   # Generate CA key and certificate
   openssl genrsa -out tls/ca-key.pem 4096 2>/dev/null
-  openssl req -new -x509 -days 365 -key tls/ca-key.pem \
+  openssl req -new -x509 -days 36500 -key tls/ca-key.pem \
     -out tls/ca.pem -subj "/CN=Vault CA" 2>/dev/null
 
   # Create SAN config
@@ -114,7 +114,7 @@ EOF
   openssl genrsa -out tls/key.pem 4096 2>/dev/null
   openssl req -new -key tls/key.pem -out tls/_vault.csr \
     -subj "/CN=${fqdn}" 2>/dev/null
-  openssl x509 -req -days 365 -in tls/_vault.csr \
+  openssl x509 -req -days 36500 -in tls/_vault.csr \
     -CA tls/ca.pem -CAkey tls/ca-key.pem -CAcreateserial \
     -out tls/cert.pem -extfile tls/_openssl.cnf -extensions v3_req 2>/dev/null
 
