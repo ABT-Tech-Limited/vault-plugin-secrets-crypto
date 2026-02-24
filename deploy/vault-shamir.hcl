@@ -9,8 +9,8 @@ listener "tcp" {
 
   # TLS - set tls_disable = true only behind a TLS-terminating reverse proxy
   tls_disable     = TLS_DISABLE_PLACEHOLDER
-  tls_cert_file   = "/vault/config/tls/cert.pem"
-  tls_key_file    = "/vault/config/tls/key.pem"
+  tls_cert_file   = "/vault/tls/cert.pem"
+  tls_key_file    = "/vault/tls/key.pem"
   tls_min_version = "tls12"
 }
 
