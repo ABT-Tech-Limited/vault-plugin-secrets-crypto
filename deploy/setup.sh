@@ -821,15 +821,26 @@ cmd_token_info() {
     exit 1
   fi
 
+  local vault_token
+  vault_token=$(read_root_token)
+
   info "Looking up crypto-admin token..."
   local result
-  result=$(curl_vault -X GET \
-    -H "X-Vault-Token: ${admin_token}" \
-    "${addr}/v1/auth/token/lookup-self" 2>/dev/null)
+  result=$(curl_vault -X POST \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "{\"token\":\"${admin_token}\"}" \
+    "${addr}/v1/auth/token/lookup" 2>/dev/null)
 
-  # Check for errors
+  # Check for empty response or errors
+  if [ -z "$result" ] || ! echo "$result" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    error "Token lookup failed: empty or invalid response from Vault"
+    info "The token may have expired. Recreate with:"
+    info "  rm crypto-admin-token && ./setup.sh create-admin"
+    exit 1
+  fi
+
   local errors
-  errors=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(d.get('errors',[])))" 2>/dev/null || echo "")
+  errors=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); errs=d.get('errors',[]); print(','.join(errs)) if errs else None" 2>/dev/null || echo "")
   if [ -n "$errors" ]; then
     error "Token lookup failed: ${errors}"
     info "The token may have expired. Recreate with:"
