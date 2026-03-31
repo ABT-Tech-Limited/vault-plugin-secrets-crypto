@@ -14,6 +14,7 @@
 #   vault-init      Initialize Vault (first time only)
 #   vault-unseal    Unseal Vault (Shamir mode)
 #   register-plugin Register and enable the crypto plugin
+#   token-info      Show crypto-admin token details
 #   status          Show Vault and plugin status
 #   backup          Create a Raft snapshot backup (online, no downtime)
 #   restore         Restore Vault from a Raft snapshot
@@ -772,7 +773,7 @@ PYEOF
   local token_result
   token_result=$(curl_vault -X POST \
     -H "X-Vault-Token: ${vault_token}" \
-    -d '{"policies":["crypto-admin"],"display_name":"crypto-admin","no_parent":true,"renewable":true}' \
+    -d '{"policies":["crypto-admin"],"display_name":"crypto-admin","no_parent":true,"renewable":true,"period":"4320h","ttl":"8760h"}' \
     "${addr}/v1/auth/token/create-orphan")
 
   local admin_token
@@ -801,6 +802,98 @@ PYEOF
   echo -e "    export VAULT_TOKEN=${admin_token}"
   echo -e "    vault write ${mount_path}/keys curve=secp256k1 name=my-key"
   echo -e "${GREEN}===========================================================${NC}"
+}
+
+cmd_token_info() {
+  local addr
+  addr="$(vault_addr)"
+
+  if [ ! -f crypto-admin-token ]; then
+    error "crypto-admin-token file not found. Run: ./setup.sh create-admin"
+    exit 1
+  fi
+
+  local admin_token
+  admin_token=$(cat crypto-admin-token)
+
+  if [ -z "$admin_token" ]; then
+    error "crypto-admin-token file is empty"
+    exit 1
+  fi
+
+  info "Looking up crypto-admin token..."
+  local result
+  result=$(curl_vault -X GET \
+    -H "X-Vault-Token: ${admin_token}" \
+    "${addr}/v1/auth/token/lookup-self" 2>/dev/null)
+
+  # Check for errors
+  local errors
+  errors=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(d.get('errors',[])))" 2>/dev/null || echo "")
+  if [ -n "$errors" ]; then
+    error "Token lookup failed: ${errors}"
+    info "The token may have expired. Recreate with:"
+    info "  rm crypto-admin-token && ./setup.sh create-admin"
+    exit 1
+  fi
+
+  echo "$result" | python3 << 'PYEOF'
+import sys, json
+from datetime import datetime, timezone
+
+data = json.load(sys.stdin).get("data", {})
+
+display_name = data.get("display_name", "N/A")
+policies = ", ".join(data.get("policies", []))
+renewable = data.get("renewable", False)
+orphan = data.get("orphan", False)
+period = data.get("period", 0)
+ttl = data.get("ttl", 0)
+creation_time = data.get("creation_time", 0)
+expire_time = data.get("expire_time", "")
+
+# Format creation time
+try:
+    ct = datetime.fromtimestamp(int(creation_time), tz=timezone.utc)
+    creation_str = ct.strftime("%Y-%m-%d %H:%M:%S UTC")
+except:
+    creation_str = str(creation_time)
+
+# Format remaining TTL
+def fmt_duration(seconds):
+    if seconds <= 0:
+        return "EXPIRED"
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    if days > 0:
+        return f"{days}d {hours}h"
+    return f"{hours}h"
+
+# Format period
+def fmt_period(seconds):
+    if seconds <= 0:
+        return "N/A (not periodic)"
+    hours = seconds // 3600
+    days = hours // 24
+    if days > 0:
+        return f"{hours}h ({days}d)"
+    return f"{hours}h"
+
+expire_str = expire_time if expire_time else "N/A (periodic token)"
+
+print()
+print(f"\033[1;33m=== Token Info ===\033[0m")
+print()
+print(f"  Display Name:   {display_name}")
+print(f"  Policies:       {policies}")
+print(f"  Created:        {creation_str}")
+print(f"  Expire Time:    {expire_str}")
+print(f"  Remaining TTL:  {fmt_duration(ttl)}")
+print(f"  Period:         {fmt_period(period)}")
+print(f"  Renewable:      {renewable}")
+print(f"  Orphan:         {orphan}")
+print()
+PYEOF
 }
 
 cmd_status() {
@@ -1016,6 +1109,7 @@ cmd_help() {
   echo "  register-plugin Register and enable the crypto plugin"
   echo "  enable-audit    Enable file audit logging"
   echo "  create-admin    Create crypto-admin policy and token"
+  echo "  token-info      Show crypto-admin token details (expiry, TTL, etc.)"
   echo "  status          Show Vault and plugin status"
   echo "  backup          Create a Raft snapshot backup (online, no downtime)"
   echo "  restore         Restore Vault from a Raft snapshot"
@@ -1052,6 +1146,7 @@ case "$COMMAND" in
   register-plugin) cmd_register_plugin ;;
   enable-audit)    cmd_enable_audit ;;
   create-admin)    cmd_create_admin ;;
+  token-info)      cmd_token_info ;;
   status)          cmd_status ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "$@" ;;
