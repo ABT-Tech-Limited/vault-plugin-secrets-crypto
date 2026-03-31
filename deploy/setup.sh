@@ -848,11 +848,11 @@ cmd_token_info() {
     exit 1
   fi
 
-  echo "$result" | python3 << 'PYEOF'
-import sys, json
+  VAULT_RESULT="$result" python3 << 'PYEOF'
+import os, json
 from datetime import datetime, timezone
 
-data = json.load(sys.stdin).get("data", {})
+data = json.loads(os.environ["VAULT_RESULT"]).get("data", {})
 
 display_name = data.get("display_name", "N/A")
 policies = ", ".join(data.get("policies", []))
