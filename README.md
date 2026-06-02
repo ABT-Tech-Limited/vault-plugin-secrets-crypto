@@ -2,7 +2,7 @@
 
 用于区块链应用的 HashiCorp Vault Secrets Engine 插件，提供加密密钥管理功能。
 
-**版本：** v0.1.0
+**版本：** v0.2.0
 
 ## 功能特性
 
@@ -141,14 +141,14 @@ export VAULT_TOKEN='<your-root-token>'
 vault plugin register \
   -sha256=$SHA256 \
   -command=vault-plugin-crypto \
-  -version=v0.1.0 \
+  -version=v0.2.0 \
   secret vault-plugin-crypto
 
 # 启用插件（带描述）
 vault secrets enable \
   -path=crypto \
   -plugin-name=vault-plugin-crypto \
-  -plugin-version=v0.1.0 \
+  -plugin-version=v0.2.0 \
   -description="区块链应用加密密钥管理" \
   plugin
 
@@ -162,13 +162,13 @@ vault secrets list -detailed | grep crypto
 # 注册插件
 curl -X POST \
   -H "X-Vault-Token: $VAULT_TOKEN" \
-  -d "{\"sha256\":\"$SHA256\",\"command\":\"vault-plugin-crypto\",\"version\":\"v0.1.0\"}" \
+  -d "{\"sha256\":\"$SHA256\",\"command\":\"vault-plugin-crypto\",\"version\":\"v0.2.0\"}" \
   $VAULT_ADDR/v1/sys/plugins/catalog/secret/vault-plugin-crypto
 
 # 启用插件
 curl -X POST \
   -H "X-Vault-Token: $VAULT_TOKEN" \
-  -d '{"type":"vault-plugin-crypto","plugin_version":"v0.1.0","description":"区块链应用加密密钥管理"}' \
+  -d '{"type":"vault-plugin-crypto","plugin_version":"v0.2.0","description":"区块链应用加密密钥管理"}' \
   $VAULT_ADDR/v1/sys/mounts/crypto
 ```
 

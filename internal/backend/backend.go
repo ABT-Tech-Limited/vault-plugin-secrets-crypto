@@ -12,7 +12,7 @@ import (
 
 const (
 	// Version is the semantic version of the plugin.
-	Version = "v0.1.0"
+	Version = "v0.2.0"
 
 	// PluginDescription provides a brief description of the plugin.
 	PluginDescription = "Cryptographic key management for blockchain applications"

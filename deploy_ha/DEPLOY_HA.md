@@ -139,7 +139,7 @@ VAULT_NODE_3_ADDR=https://vault-3.example.com:8200
 ./setup-ha.sh init-dirs
 
 # 将插件二进制（linux/amd64）复制到 plugins/ 目录
-cp /path/to/vault-plugin-crypto-v0.1.0 plugins/
+cp /path/to/vault-plugin-crypto-v0.2.0 plugins/
 ```
 
 ### 第二步：生成 CA 证书（节点 1）

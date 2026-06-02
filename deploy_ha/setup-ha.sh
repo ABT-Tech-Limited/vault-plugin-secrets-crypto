@@ -79,7 +79,7 @@ cmd_init_dirs() {
   chmod 700 config tls
 
   # Check plugin binary
-  local plugin_binary="${PLUGIN_NAME:-vault-plugin-crypto}-${PLUGIN_VERSION:-v0.1.0}"
+  local plugin_binary="${PLUGIN_NAME:-vault-plugin-crypto}-${PLUGIN_VERSION:-v0.2.0}"
   if [ -f "plugins/${plugin_binary}" ]; then
     ok "Plugin binary found: plugins/${plugin_binary}"
   else
@@ -355,7 +355,7 @@ cmd_register_plugin() {
   local addr
   addr="$(vault_addr)"
   local plugin_name="${PLUGIN_NAME:-vault-plugin-crypto}"
-  local plugin_version="${PLUGIN_VERSION:-v0.1.0}"
+  local plugin_version="${PLUGIN_VERSION:-v0.2.0}"
   local plugin_binary="${plugin_name}-${plugin_version}"
   local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
 

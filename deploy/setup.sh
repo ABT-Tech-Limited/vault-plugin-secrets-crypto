@@ -412,7 +412,7 @@ cmd_init_dirs() {
   chmod 700 config tls data
 
   # Check plugin binary
-  local plugin_binary="${PLUGIN_NAME:-vault-plugin-crypto}-${PLUGIN_VERSION:-v0.1.0}"
+  local plugin_binary="${PLUGIN_NAME:-vault-plugin-crypto}-${PLUGIN_VERSION:-v0.2.0}"
   if [ ! -f "../build/${plugin_binary}" ]; then
     warn "Plugin binary not found: ../build/${plugin_binary}"
     warn "Run 'make build' in the project root first."
@@ -635,7 +635,7 @@ cmd_register_plugin() {
   local addr
   addr="$(vault_addr)"
   local plugin_name="${PLUGIN_NAME:-vault-plugin-crypto}"
-  local plugin_version="${PLUGIN_VERSION:-v0.1.0}"
+  local plugin_version="${PLUGIN_VERSION:-v0.2.0}"
   local plugin_binary="${plugin_name}-${plugin_version}"
   local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
 

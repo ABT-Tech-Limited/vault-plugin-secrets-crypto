@@ -407,7 +407,7 @@ curl -s --cacert tls/ca.pem -X POST \
 ```bash
 VAULT_ADDR="https://127.0.0.1:8200"
 VAULT_TOKEN="your-root-token"
-PLUGIN_VERSION="v0.1.0"
+PLUGIN_VERSION="v0.2.0"
 PLUGIN_BINARY="vault-plugin-crypto-${PLUGIN_VERSION}"
 
 # 1. 计算 SHA256
@@ -439,8 +439,8 @@ export VAULT_CACERT="tls/ca.pem"
 vault login  # 输入 Root Token
 
 # 注册
-SHA256=$(shasum -a 256 ../build/vault-plugin-crypto-v0.1.0 | cut -d ' ' -f1)
-vault plugin register -sha256=${SHA256} -version=v0.1.0 secret vault-plugin-crypto
+SHA256=$(shasum -a 256 ../build/vault-plugin-crypto-v0.2.0 | cut -d ' ' -f1)
+vault plugin register -sha256=${SHA256} -version=v0.2.0 secret vault-plugin-crypto
 
 # 启用
 vault secrets enable -path=crypto -plugin-name=vault-plugin-crypto plugin
@@ -635,15 +635,15 @@ docker compose -f docker-compose.prod.yml logs vault
 
 ```bash
 # SHA256 不匹配
-shasum -a 256 ../build/vault-plugin-crypto-v0.1.0
+shasum -a 256 ../build/vault-plugin-crypto-v0.2.0
 # 确保与注册时使用的值一致
 
 # 二进制架构不匹配（必须是 linux/amd64）
-file ../build/vault-plugin-crypto-v0.1.0
+file ../build/vault-plugin-crypto-v0.2.0
 # 应显示：ELF 64-bit LSB executable, x86-64
 
 # 权限问题
-ls -la ../build/vault-plugin-crypto-v0.1.0
+ls -la ../build/vault-plugin-crypto-v0.2.0
 # 确保文件可执行
 ```
 

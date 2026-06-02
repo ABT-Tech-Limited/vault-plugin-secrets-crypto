@@ -7,7 +7,7 @@ set -e
 
 VAULT_ADDR="http://127.0.0.1:8200"
 VAULT_TOKEN="root"
-VERSION="v0.1.0"
+VERSION="v0.2.0"
 PLUGIN_BINARY="vault-plugin-crypto-${VERSION}"
 
 # Colors
