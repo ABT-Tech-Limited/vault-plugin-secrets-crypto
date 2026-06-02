@@ -27,12 +27,12 @@ func pathKeys(b *CryptoBackend) []*framework.Path {
 				},
 				"name": {
 					Type:        framework.TypeString,
-					Description: "Name for the key (required, alphanumeric, underscore, hyphen only)",
+					Description: "Name for the key (required, alphanumeric, space, underscore, hyphen, colon only)",
 					Required:    true,
 				},
 				"external_id": {
 					Type:        framework.TypeString,
-					Description: "Unique external identifier for the key (required, alphanumeric, dot, underscore, hyphen only)",
+					Description: "Unique external identifier for the key (required; letters, digits, dot, underscore, hyphen, colon; must start and end with a letter, digit, or underscore)",
 					Required:    true,
 				},
 				"metadata": {
@@ -55,7 +55,7 @@ func pathKeys(b *CryptoBackend) []*framework.Path {
 		},
 		{
 			// GET /keys/:external_id - Read key info
-			Pattern: "keys/" + framework.GenericNameRegex("external_id"),
+			Pattern: "keys/" + externalIDRouteRegex("external_id"),
 			Fields: map[string]*framework.FieldSchema{
 				"external_id": {
 					Type:        framework.TypeString,
@@ -225,8 +225,8 @@ This endpoint manages cryptographic keys for blockchain applications.
 CREATE (POST /keys):
   Required:
     - curve: The elliptic curve type (secp256k1, secp256r1, or ed25519)
-    - name: A name for the key (alphanumeric, underscore, hyphen)
-    - external_id: A unique external identifier (alphanumeric, dot, underscore, hyphen)
+    - name: A name for the key (alphanumeric, space, underscore, hyphen, colon)
+    - external_id: A unique external identifier (alphanumeric, dot, underscore, hyphen, colon; must start and end with an alphanumeric or underscore)
 
   Optional:
     - metadata: Key-value pairs for additional information

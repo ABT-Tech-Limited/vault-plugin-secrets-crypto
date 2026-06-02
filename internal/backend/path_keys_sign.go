@@ -16,7 +16,7 @@ import (
 func pathKeysSign(b *CryptoBackend) []*framework.Path {
 	return []*framework.Path{
 		{
-			Pattern: "keys/" + framework.GenericNameRegex("external_id") + "/sign",
+			Pattern: "keys/" + externalIDRouteRegex("external_id") + "/sign",
 			Fields: map[string]*framework.FieldSchema{
 				"external_id": {
 					Type:        framework.TypeString,

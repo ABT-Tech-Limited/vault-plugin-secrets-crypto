@@ -20,8 +20,8 @@ const (
 	MaxDataLength = 1024 * 1024
 )
 
-// namePattern allows alphanumeric, space, underscore, and hyphen.
-var namePattern = regexp.MustCompile(`^[a-zA-Z0-9 _-]+$`)
+// namePattern allows alphanumeric, space, underscore, hyphen, and colon.
+var namePattern = regexp.MustCompile(`^[a-zA-Z0-9 _:-]+$`)
 
 // ValidateName validates a key name.
 func ValidateName(name string) error {
@@ -32,13 +32,27 @@ func ValidateName(name string) error {
 		return fmt.Errorf("name exceeds maximum length of %d characters", MaxNameLength)
 	}
 	if !namePattern.MatchString(name) {
-		return fmt.Errorf("name contains invalid characters: only alphanumeric, space, underscore, and hyphen allowed")
+		return fmt.Errorf("name contains invalid characters: only alphanumeric, space, underscore, hyphen, and colon allowed")
 	}
 	return nil
 }
 
-// externalIDPattern allows alphanumeric, dot, underscore, and hyphen.
-var externalIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+// externalIDCorePattern is the shared shape rule for external_id: the first and
+// last characters must be word characters ([A-Za-z0-9_]); dots, colons, and
+// hyphens are allowed in between. Value validation (externalIDPattern) and URL
+// route matching (externalIDRouteRegex) both build on it so they cannot drift.
+const externalIDCorePattern = `\w(([\w.:-]+)?\w)?`
+
+// externalIDPattern validates an external_id value end to end.
+var externalIDPattern = regexp.MustCompile(`^` + externalIDCorePattern + `$`)
+
+// externalIDRouteRegex returns a path-capturing regex for external_id used in
+// URL route patterns. It mirrors framework.GenericNameRegex but additionally
+// permits colons, and shares externalIDCorePattern with externalIDPattern so
+// any value that validates is always reachable via its URL.
+func externalIDRouteRegex(name string) string {
+	return fmt.Sprintf(`(?P<%s>%s)`, name, externalIDCorePattern)
+}
 
 // ValidateExternalID validates an external ID.
 func ValidateExternalID(extID string) error {
@@ -49,7 +63,7 @@ func ValidateExternalID(extID string) error {
 		return fmt.Errorf("external_id exceeds maximum length of %d characters", MaxExternalIDLength)
 	}
 	if !externalIDPattern.MatchString(extID) {
-		return fmt.Errorf("external_id contains invalid characters: only alphanumeric, dot, underscore, and hyphen allowed")
+		return fmt.Errorf("external_id has invalid format: must start and end with a letter, digit, or underscore, and may contain dots, colons, and hyphens in between")
 	}
 	return nil
 }
