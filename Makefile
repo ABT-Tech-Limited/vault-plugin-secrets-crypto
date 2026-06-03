@@ -118,6 +118,12 @@ dev: build-linux
 		-d '{"type":"$(PLUGIN_NAME)","plugin_version":"$(VERSION)"}' \
 		$(VAULT_ADDR)/v1/sys/mounts/crypto > /dev/null || true
 	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
+	echo "Tuning mount to plugin version $(VERSION)..." && \
+	curl -s -X POST \
+		-H "X-Vault-Token: $$VAULT_TOKEN" \
+		-d '{"plugin_version":"$(VERSION)"}' \
+		$(VAULT_ADDR)/v1/sys/mounts/crypto/tune > /dev/null || true
+	@VAULT_TOKEN=$$(cat vault-data/.root-token) && \
 	echo "Reloading plugin..." && \
 	curl -s -X PUT \
 		-H "X-Vault-Token: $$VAULT_TOKEN" \
