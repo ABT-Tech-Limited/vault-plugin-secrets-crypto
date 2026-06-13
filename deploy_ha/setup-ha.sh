@@ -136,8 +136,14 @@ cmd_gen_cert() {
     return
   fi
 
-  # Collect all node FQDNs for SAN
+  # Collect all node FQDNs/IPs for SAN.
+  # VAULT_SAN_IP adds the node's private IP as an IP SAN entry — required when
+  # peers/clients connect by IP, since TLS verifies IPs against iPAddress SANs
+  # (a DNS:<ip> entry does NOT satisfy IP verification).
   local san="DNS:${fqdn},DNS:localhost,IP:127.0.0.1"
+  if [ -n "${VAULT_SAN_IP:-}" ]; then
+    san="${san},IP:${VAULT_SAN_IP}"
+  fi
 
   # Create SAN config
   cat > tls/_openssl.cnf <<EOF
