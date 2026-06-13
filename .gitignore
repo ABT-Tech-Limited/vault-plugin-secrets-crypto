@@ -71,7 +71,10 @@ deploy_ha/tls/
 deploy_ha/config/
 deploy_ha/logs/
 deploy_ha/backups/
-deploy_ha/plugins/
 deploy_ha/vault-init-keys.json
 
 .claude
+
+# Track the HA plugin binary (committed so `git pull` deploys it to nodes)
+!deploy_ha/plugins/
+!deploy_ha/plugins/**
