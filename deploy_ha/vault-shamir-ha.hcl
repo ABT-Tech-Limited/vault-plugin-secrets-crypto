@@ -46,7 +46,7 @@ plugin_directory = "/vault/plugins"
 api_addr     = "VAULT_API_ADDR_PLACEHOLDER"
 cluster_addr = "VAULT_CLUSTER_ADDR_PLACEHOLDER"
 
-disable_mlock = false
+disable_mlock = true
 
 log_level = "LOG_LEVEL_PLACEHOLDER"
 
