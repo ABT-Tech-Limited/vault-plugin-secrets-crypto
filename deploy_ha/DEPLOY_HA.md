@@ -130,6 +130,117 @@ deploy_ha/
 
 ---
 
+## AWS 单 AZ 部署
+
+本章描述在 AWS 上手动准备 3 台 EC2 的基础设施；准备好后再回到 [部署流程](#部署流程) 用 `setup-ha.sh` 部署。地址方案采用**私网 IP 直连**，客户端直连节点（不使用负载均衡器）。
+
+### 1. 网络与实例
+
+| 项 | 配置 |
+|----|------|
+| VPC | 1 个（已有或新建） |
+| 子网 | 1 个私有子网（单 AZ，例如 `us-east-1a`） |
+| EC2 | 3 台，同一 AZ，同一 **spread placement group** |
+| 实例规格 | 内存敏感，建议 `m5.large`（2 vCPU / 8 GiB）量级起步，按负载调整 |
+| AMI | Amazon Linux 2023 或 Ubuntu 22.04+ |
+| 软件 | Docker Engine 20.10+ 与 Docker Compose V2 |
+
+创建 spread placement group（一次）：
+
+```bash
+aws ec2 create-placement-group \
+  --group-name vault-ha-spread \
+  --strategy spread
+```
+
+启动 3 台 EC2 时带上 `--placement "GroupName=vault-ha-spread"`，确保落在不同硬件。
+
+**主机准备（每台）**：
+
+- 关闭 swap（Vault 用 mlock 防止密钥被换出到磁盘）：`sudo swapoff -a`，并从 `/etc/fstab` 移除 swap 条目
+- `docker-compose.ha.yml` 已声明 `cap_add: IPC_LOCK`，配合配置里的 `disable_mlock = false`，无需额外设置
+
+### 2. 存储（EBS）
+
+每台 EC2 额外挂一块 **gp3 EBS** 卷给 Raft 数据：
+
+- 卷对应 docker 卷 `vault-data`（compose 映射到容器 `/vault/data`）
+- 开启 **EBS 静态加密**（AWS KMS 默认或自定义 key）
+- 容量：Raft 在**每个**节点都存全量数据，按数据规模 + 快照增长预留（起步 ≥ 20 GiB）
+
+### 3. 安全组
+
+3 台 EC2 用同一个安全组 `sg-vault`：
+
+| 方向 | 端口 | 协议 | 来源 / 目标 | 用途 |
+|------|------|------|-------------|------|
+| 入站 | 8200 | TCP | 客户端 / 应用 SG | Vault API |
+| 入站 | 8201 | TCP | `sg-vault` 自身 | Raft 集群通信（仅节点间） |
+| 入站 | 22 | TCP | 堡垒机 SG（或不开，用 SSM） | 运维登录 |
+| 出站 | 443 | TCP | 0.0.0.0/0 | 拉镜像等（按需收紧） |
+
+> 8201 用**安全组自引用**（来源填 `sg-vault` 自己），只有集群内节点能互联，外部访问不到 Raft 端口。
+
+### 4. 地址与证书（私网 IP）
+
+本指南用**私网 IP** 作为节点地址。关键点：**TLS 对 IP 的校验走证书 SAN 的 `IP:` 项**，所以每台证书 SAN 必须含自己的私网 IP，否则节点间 Raft 与客户端连接都会 TLS 失败。
+
+每台 `.env` 按本节点私网 IP 设置（示例为节点 1）：
+
+```bash
+VAULT_FQDN=10.0.1.10           # 本节点私网 IP
+VAULT_SAN_IP=10.0.1.10         # 写入证书 SAN 的 IP（必填）
+
+VAULT_NODE_1_ADDR=https://10.0.1.10:8200
+VAULT_NODE_2_ADDR=https://10.0.1.11:8200
+VAULT_NODE_3_ADDR=https://10.0.1.12:8200
+```
+
+`setup-ha.sh gen-cert` 会据 `VAULT_SAN_IP` 把 `IP:10.0.1.x` 写进证书 SAN。同一 VPC 内私网 IP 可直接互通。
+
+> 也可改用 Route53 私有托管区给每台分配 DNS 名（如 `vault-1.internal`）；用 DNS 名则无需 IP SAN、`VAULT_SAN_IP` 可留空。本指南按私网 IP 走。
+
+### 5. 客户端访问（直连，无负载均衡）
+
+客户端（你的应用）**直连节点**，不经 LB：
+
+- 客户端配置**全部 3 个节点地址** `https://<私网IP>:8200`，并信任集群 CA（`ca.pem`）
+- Vault standby 节点默认会把请求**转发给 leader**，所以命中任意一个**健康且已解封**的节点都能正常读写
+- **没有 LB，客户端需自己做失败重试**：某节点 sealed（HTTP 503）或不可达时，换下一个地址重试
+- 节点证书 SAN 已含私网 IP，客户端 HTTPS 直接校验通过
+
+### 6. 架构（单 AZ）
+
+```
+                       Region: us-east-1
+           ┌──────── Availability Zone: us-east-1a ─────────┐
+           │        Spread Placement Group: vault-ha        │
+           │                                                │
+           │  EC2 #1 10.0.1.10   EC2 #2 10.0.1.11   EC2 #3 10.0.1.12
+           │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+  clients ─┼─▶│ Vault+crypto│   │ Vault+crypto│   │ Vault+crypto│
+ (直连3地址)│  │ Raft + gp3  │   │ Raft + gp3  │   │ Raft + gp3  │
+           │  │ :8200 :8201 │   │ :8200 :8201 │   │ :8200 :8201 │
+           │  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
+           │         └──── Raft (TLS, :8201, sg 自引用) ───┘
+           └────────────────────────────────────────────────┘
+  ⚠ 单 AZ：扛单实例故障，不扛整个 AZ 故障
+```
+
+### 7. Shamir 解封在 AWS 上的注意事项
+
+本指南用 Shamir 手动解封，在云上有几个运维点：
+
+- **每次重启 / 换实例都要人工解封**：节点重启后是 sealed 状态，需有人执行 `./setup-ha.sh vault-unseal` 输入 3 个 unseal key。准备 break-glass 流程，明确谁持有 key、如何快速解封。
+- **不要用 Auto Scaling Group**：新实例起来是 sealed 的，无法自动加入服务。本部署用**固定实例**。
+- **快照异地备份**：把 Raft 快照推到 S3 留存：
+  ```bash
+  aws s3 cp backups/vault-backup-YYYYMMDD_HHMMSS.snap \
+    s3://your-bucket/vault-snapshots/ --sse aws:kms
+  ```
+  给该 S3 前缀配生命周期策略做保留 / 过期。
+- **将来想免人工解封**：可切换到 AWS KMS 自动解封（已有模板 `vault-awskms-ha.hcl`），重启 / 扩缩容无需手动输 key。注意自动解封下 `init` 拿到的是 **recovery key** 而非 unseal key。
+
 ## 部署流程
 
 ### 第一步：准备（所有节点）
