@@ -27,7 +27,7 @@
 
 | 依赖 | 要求 | 说明 |
 |------|------|------|
-| 服务器 | 3 台 | 3 台 EC2，同一 AZ，同一 spread placement group |
+| 服务器 | 3 台 | 3 台 EC2，同一 AZ |
 | Docker Engine | 20.10+ | 每台服务器 |
 | Docker Compose | V2 | 每台服务器 |
 | openssl | - | TLS 证书生成 |
@@ -96,8 +96,6 @@ Vault 整合存储用 Raft 共识，可用的**投票节点必须超过半数**�
 - ✅ **扛得住**：单台实例故障（硬件 / 实例崩溃 / 重启）—— Raft quorum 2/3 仍满足，集群继续服务
 - ❌ **扛不住**：整个 AZ 故障（断电 / 网络隔离）—— 3 台一起失联
 
-**缓解相关性故障**：把 3 台 EC2 放进同一个 **spread placement group**，AWS 会强制把它们分散到不同的底层硬件 / 机架（单 AZ 内每个 spread group 上限 7 台），避免「三台恰好落在同一宿主机、一损俱损」。这是单 AZ 下能做到的最好实例级隔离。
-
 > **想抵御 AZ 级故障？** 把 3 台分到 3 个不同 AZ 即可，本套工具链与配置无需改动，只是把实例放到不同子网。代价是跨 AZ 复制有少量延迟与数据传输费。
 
 ---
@@ -140,20 +138,10 @@ deploy_ha/
 |----|------|
 | VPC | 1 个（已有或新建） |
 | 子网 | 1 个私有子网（单 AZ，例如 `us-east-1a`） |
-| EC2 | 3 台，同一 AZ，同一 **spread placement group** |
+| EC2 | 3 台，同一 AZ |
 | 实例规格 | 内存敏感，建议 `m5.large`（2 vCPU / 8 GiB）量级起步，按负载调整 |
 | AMI | Amazon Linux 2023 或 Ubuntu 22.04+ |
 | 软件 | Docker Engine 20.10+ 与 Docker Compose V2 |
-
-创建 spread placement group（一次）：
-
-```bash
-aws ec2 create-placement-group \
-  --group-name vault-ha-spread \
-  --strategy spread
-```
-
-启动 3 台 EC2 时带上 `--placement "GroupName=vault-ha-spread"`，确保落在不同硬件。
 
 **主机准备（每台）**：
 
@@ -214,7 +202,6 @@ VAULT_NODE_3_ADDR=https://10.0.1.12:8200
 ```
                        Region: us-east-1
            ┌──────── Availability Zone: us-east-1a ─────────┐
-           │        Spread Placement Group: vault-ha        │
            │                                                │
            │  EC2 #1 10.0.1.10   EC2 #2 10.0.1.11   EC2 #3 10.0.1.12
            │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
