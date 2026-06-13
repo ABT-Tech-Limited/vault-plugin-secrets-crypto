@@ -344,6 +344,8 @@ Root Token: hvs.xxxxxxxxxxxxx
 
 ### 第六步：解封（所有节点）
 
+> 本指南采用 **Shamir 手动解封**。若改用 AWS KMS 自动解封（`vault-awskms-ha.hcl`），节点启动会自动解封，`init` 得到的是 recovery key 而非 unseal key，本步骤可跳过。
+
 在 **每台节点** 上执行（使用相同的 unseal keys）：
 
 ```bash
@@ -409,9 +411,23 @@ Root Token: hvs.xxxxxxxxxxxxx
 
 ### 自动备份
 
+先创建一个**最小权限**的备份策略与专用 token（不要用 root token）：
+
 ```bash
-# crontab 示例：每天凌晨 2 点在 leader 上备份
-0 2 * * * cd /path/to/deploy_ha && VAULT_TOKEN=hvs.xxx ./setup-ha.sh backup
+# 备份策略：只允许读取 Raft 快照
+vault policy write raft-snapshot - <<'EOF'
+path "sys/storage/raft/snapshot" {
+  capabilities = ["read"]
+}
+EOF
+
+# 生成长期 token 专供备份用
+vault token create -policy=raft-snapshot -period=720h -orphan
+```
+
+```bash
+# crontab：每天凌晨 2 点在 leader 上备份（用上面的受限 token，切勿用 root）
+0 2 * * * cd /path/to/deploy_ha && VAULT_TOKEN=hvs.<backup-token> ./setup-ha.sh backup
 ```
 
 ---
