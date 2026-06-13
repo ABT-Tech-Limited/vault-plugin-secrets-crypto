@@ -75,3 +75,7 @@ deploy_ha/plugins/
 deploy_ha/vault-init-keys.json
 
 .claude
+
+# Track the plugins/ directory and its contents (plugin version checksums)
+!plugins/
+!plugins/**
