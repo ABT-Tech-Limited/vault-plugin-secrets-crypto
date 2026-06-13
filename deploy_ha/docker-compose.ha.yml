@@ -8,7 +8,7 @@ services:
       - "${VAULT_CLUSTER_PORT:-8201}:8201"
     environment:
       VAULT_ADDR: "https://127.0.0.1:8200"
-      VAULT_CACERT: "/vault/config/tls/ca.pem"
+      VAULT_CACERT: "/vault/tls/ca.pem"
       # AWS KMS credentials (only needed for awskms unseal method)
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
@@ -18,15 +18,19 @@ services:
     volumes:
       # Persistent data storage (Raft)
       - vault-data:/vault/data
-      # Vault HCL configuration (read-only)
-      - ./config:/vault/config:ro
-      # TLS certificates (read-only)
-      - ./tls:/vault/config/tls:ro
+      # Vault HCL configuration (entrypoint chowns to vault user)
+      - ./config:/vault/config
+      # TLS certificates (top-level mount; entrypoint chowns to vault user)
+      - ./tls:/vault/tls
       # Plugin binaries (read-only)
       - ./plugins:/vault/plugins:ro
       # Audit logs
       - ./logs:/vault/logs
-    command: vault server -config=/vault/config/vault.hcl
+    # Chown bind-mounted dirs (data, tls) the default entrypoint does not handle,
+    # then delegate to the original entrypoint which chowns config/logs and drops to vault user.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - chown -R vault:vault /vault/data /vault/tls && exec docker-entrypoint.sh vault server -config=/vault/config/vault.hcl
     healthcheck:
       test: ["CMD-SHELL", "vault status -tls-skip-verify 2>&1 || [ $$? -eq 2 ]"]
       interval: 30s

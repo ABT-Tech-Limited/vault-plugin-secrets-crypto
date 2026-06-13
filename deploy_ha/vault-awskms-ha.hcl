@@ -12,9 +12,9 @@ listener "tcp" {
 
   # TLS is REQUIRED for HA cluster communication
   tls_disable     = TLS_DISABLE_PLACEHOLDER
-  tls_cert_file   = "/vault/config/tls/cert.pem"
-  tls_key_file    = "/vault/config/tls/key.pem"
-  tls_client_ca_file = "/vault/config/tls/ca.pem"
+  tls_cert_file   = "/vault/tls/cert.pem"
+  tls_key_file    = "/vault/tls/key.pem"
+  tls_client_ca_file = "/vault/tls/ca.pem"
   tls_min_version = "tls12"
 }
 
@@ -24,23 +24,23 @@ storage "raft" {
 
   retry_join {
     leader_api_addr         = "VAULT_NODE_1_API_ADDR_PLACEHOLDER"
-    leader_ca_cert_file     = "/vault/config/tls/ca.pem"
-    leader_client_cert_file = "/vault/config/tls/cert.pem"
-    leader_client_key_file  = "/vault/config/tls/key.pem"
+    leader_ca_cert_file     = "/vault/tls/ca.pem"
+    leader_client_cert_file = "/vault/tls/cert.pem"
+    leader_client_key_file  = "/vault/tls/key.pem"
   }
 
   retry_join {
     leader_api_addr         = "VAULT_NODE_2_API_ADDR_PLACEHOLDER"
-    leader_ca_cert_file     = "/vault/config/tls/ca.pem"
-    leader_client_cert_file = "/vault/config/tls/cert.pem"
-    leader_client_key_file  = "/vault/config/tls/key.pem"
+    leader_ca_cert_file     = "/vault/tls/ca.pem"
+    leader_client_cert_file = "/vault/tls/cert.pem"
+    leader_client_key_file  = "/vault/tls/key.pem"
   }
 
   retry_join {
     leader_api_addr         = "VAULT_NODE_3_API_ADDR_PLACEHOLDER"
-    leader_ca_cert_file     = "/vault/config/tls/ca.pem"
-    leader_client_cert_file = "/vault/config/tls/cert.pem"
-    leader_client_key_file  = "/vault/config/tls/key.pem"
+    leader_ca_cert_file     = "/vault/tls/ca.pem"
+    leader_client_cert_file = "/vault/tls/cert.pem"
+    leader_client_key_file  = "/vault/tls/key.pem"
   }
 }
 
