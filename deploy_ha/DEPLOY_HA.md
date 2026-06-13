@@ -257,21 +257,22 @@ cp .env.example .env
 vim .env
 ```
 
-**各节点 .env 差异对照：**
+**各节点 .env 差异对照：**（AWS 私网 IP 部署：`VAULT_FQDN` 与 `VAULT_SAN_IP` 均填各节点私网 IP，详见上文「AWS 单 AZ 部署」§4）
 
 | 变量 | 节点 1 | 节点 2 | 节点 3 |
 |------|--------|--------|--------|
 | `VAULT_CONTAINER_NAME` | vault-ha-1 | vault-ha-2 | vault-ha-3 |
 | `VAULT_DATA_VOLUME` | vault-ha-data-1 | vault-ha-data-2 | vault-ha-data-3 |
 | `VAULT_NODE_ID` | vault-1 | vault-2 | vault-3 |
-| `VAULT_FQDN` | vault-1.example.com | vault-2.example.com | vault-3.example.com |
+| `VAULT_FQDN` | 10.0.1.10 | 10.0.1.11 | 10.0.1.12 |
+| `VAULT_SAN_IP` | 10.0.1.10 | 10.0.1.11 | 10.0.1.12 |
 
 以下变量在 **所有节点相同**：
 
 ```bash
-VAULT_NODE_1_ADDR=https://vault-1.example.com:8200
-VAULT_NODE_2_ADDR=https://vault-2.example.com:8200
-VAULT_NODE_3_ADDR=https://vault-3.example.com:8200
+VAULT_NODE_1_ADDR=https://10.0.1.10:8200
+VAULT_NODE_2_ADDR=https://10.0.1.11:8200
+VAULT_NODE_3_ADDR=https://10.0.1.12:8200
 ```
 
 ```bash

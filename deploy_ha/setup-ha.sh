@@ -168,7 +168,7 @@ EOF
   chmod 600 tls/key.pem tls/cert.pem
 
   ok "Node certificate generated:"
-  info "  Cert: tls/cert.pem (SAN: ${fqdn}, localhost, 127.0.0.1)"
+  info "  Cert: tls/cert.pem (SAN: ${san})"
   info "  Key:  tls/key.pem"
 }
 
