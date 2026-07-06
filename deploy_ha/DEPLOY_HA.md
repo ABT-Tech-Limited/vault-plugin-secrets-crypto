@@ -399,24 +399,43 @@ Root Token: hvs.xxxxxxxxxxxxx
 
 ### 自动备份
 
-先创建一个**最小权限**的备份策略与专用 token（不要用 root token）：
+自动备份**不要用 root token**。用下面的命令生成一个**最小权限、可续期**的专用 token（纯 HTTP API，**无需安装 vault CLI**）：
 
 ```bash
-# 备份策略：只允许读取 Raft 快照
-vault policy write raft-snapshot - <<'EOF'
-path "sys/storage/raft/snapshot" {
-  capabilities = ["read"]
-}
-EOF
-
-# 生成长期 token 专供备份用
-vault token create -policy=raft-snapshot -period=720h -orphan
+# 在 leader 上运行，按提示输入 root token（或先 export VAULT_TOKEN=<root>）
+./setup-ha.sh gen-backup-token
 ```
+
+它会：
+
+1. 写入策略 `raft-snapshot`——只允许读取 Raft 快照 + 续期自身 token：
+   ```hcl
+   path "sys/storage/raft/snapshot" { capabilities = ["read"] }
+   path "auth/token/renew-self"     { capabilities = ["update"] }
+   ```
+2. 创建一个绑定该策略的 **periodic**（`period=720h`）**orphan** token，并去掉默认策略；
+3. 打印 token 并写入 `backups/backup.token`（权限 `600`）。
+
+配置 crontab（该 token 是 periodic，需定期续期才不过期；续期失败不阻断当次备份）：
 
 ```bash
-# crontab：每天凌晨 2 点在 leader 上备份（用上面的受限 token，切勿用 root）
-0 2 * * * cd /path/to/deploy_ha && VAULT_TOKEN=hvs.<backup-token> ./setup-ha.sh backup
+# 每天凌晨 2 点在 leader 上：先尽力续期备份 token，再备份
+0 2 * * * cd /path/to/deploy_ha && T=$(cat backups/backup.token) \
+  && { curl -s --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
+       https://127.0.0.1:8200/v1/auth/token/renew-self -o /dev/null || true; } \
+  && VAULT_TOKEN=$T ./setup-ha.sh backup >> logs/backup.log 2>&1
 ```
+
+> `TLS_DISABLE=true` 时把 `https://` 改为 `http://` 并去掉 `--cacert tls/ca.pem`。
+
+> 若环境已安装 vault CLI，也可等价手动创建（策略同上两条）：
+> ```bash
+> vault policy write raft-snapshot - <<'EOF'
+> path "sys/storage/raft/snapshot" { capabilities = ["read"] }
+> path "auth/token/renew-self"     { capabilities = ["update"] }
+> EOF
+> vault token create -policy=raft-snapshot -period=720h -orphan
+> ```
 
 ---
 

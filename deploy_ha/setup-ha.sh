@@ -15,6 +15,7 @@
 #   register-plugin Register and enable the crypto plugin (run on leader only)
 #   status          Show this node's Vault status
 #   raft-status     Show Raft cluster member list
+#   gen-backup-token Create a least-privilege backup token (run on leader)
 #   backup          Create a Raft snapshot backup (online, no downtime)
 #   restore         Restore Vault from a Raft snapshot
 #   help            Show this help message
@@ -523,6 +524,87 @@ for s in servers:
   echo ""
 }
 
+cmd_gen_backup_token() {
+  local addr
+  addr="$(vault_addr)"
+  local policy_name="raft-snapshot"
+  local token_file="backups/backup.token"
+
+  info "Generating a least-privilege backup token via the Vault API (no vault CLI needed)..."
+
+  # Root token (or any token with sudo on auth/token/create): prefer env, else prompt
+  local vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ]; then
+    echo -n "Enter Vault root token: "
+    read -r -s vault_token
+    echo ""
+  fi
+  if [ -z "$vault_token" ]; then
+    error "No token provided."
+    exit 1
+  fi
+
+  # 1. Write the least-privilege policy: read Raft snapshots + renew own token.
+  #    renew-self is required so this periodic token can keep renewing itself
+  #    without relying on the (broader) default policy.
+  info "Writing policy '${policy_name}' (snapshot read + renew-self)..."
+  local policy_hcl='path "sys/storage/raft/snapshot" {
+  capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}'
+  local policy_payload
+  policy_payload=$(printf '%s' "$policy_hcl" | python3 -c 'import json,sys; print(json.dumps({"policy": sys.stdin.read()}))')
+
+  local code
+  code=$(curl_vault -X PUT \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "$policy_payload" \
+    -o /dev/null -w "%{http_code}" \
+    "${addr}/v1/sys/policies/acl/${policy_name}" 2>/dev/null || echo "000")
+  if [ "$code" != "204" ] && [ "$code" != "200" ]; then
+    error "Failed to write policy '${policy_name}' (HTTP ${code})."
+    error "The token needs permission to write sys/policies/acl (root or equivalent)."
+    exit 1
+  fi
+  ok "Policy '${policy_name}' written"
+
+  # 2. Create an orphan, periodic token bound to that policy, with no default policy.
+  #    no_parent  -> survives revocation of the root token used here (orphan)
+  #    period     -> periodic token, renewable indefinitely, never hits a max TTL
+  info "Creating periodic backup token (period=720h, orphan, no default policy)..."
+  local create_payload
+  create_payload='{"policies":["'"${policy_name}"'"],"period":"720h","no_parent":true,"no_default_policy":true,"display_name":"raft-snapshot-backup","meta":{"purpose":"automated-raft-snapshot-backup"}}'
+  local resp
+  resp=$(curl_vault -X POST \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "$create_payload" \
+    "${addr}/v1/auth/token/create" 2>/dev/null || echo "")
+
+  local backup_token
+  backup_token=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('client_token',''))" 2>/dev/null || echo "")
+  if [ -z "$backup_token" ]; then
+    error "Token creation failed. Vault response:"
+    echo "$resp" | python3 -m json.tool 2>/dev/null || echo "$resp"
+    exit 1
+  fi
+
+  # 3. Persist with tight permissions, then display.
+  mkdir -p backups
+  ( umask 077; printf '%s' "$backup_token" > "$token_file" )
+  chmod 600 "$token_file"
+
+  ok "Backup token created and saved to ${token_file} (mode 600)"
+  echo ""
+  info "Token: ${backup_token}"
+  echo ""
+  echo -e "${YELLOW}Next steps:${NC}"
+  echo "  - Unattended backup:  VAULT_TOKEN=\$(cat ${token_file}) ./setup-ha.sh backup"
+  echo "  - This token is periodic (720h); renew it on a schedule so it never expires."
+  echo "  - Full crontab example (renew + backup): see DEPLOY_HA.md -> 自动备份"
+}
+
 cmd_backup() {
   local addr
   addr="$(vault_addr)"
@@ -652,11 +734,12 @@ cmd_help() {
   echo "  register-plugin Register and enable the crypto plugin (run on leader only)"
   echo ""
   echo "Operations:"
-  echo "  status          Show this node's Vault status"
-  echo "  raft-status     Show Raft cluster member list"
-  echo "  backup          Create a Raft snapshot backup (online, no downtime)"
-  echo "  restore         Restore Vault from a Raft snapshot"
-  echo "  help            Show this help message"
+  echo "  status           Show this node's Vault status"
+  echo "  raft-status      Show Raft cluster member list"
+  echo "  gen-backup-token Create a least-privilege token for unattended backups"
+  echo "  backup           Create a Raft snapshot backup (online, no downtime)"
+  echo "  restore          Restore Vault from a Raft snapshot"
+  echo "  help             Show this help message"
 }
 
 # ==================== Main ====================
@@ -687,6 +770,7 @@ case "$COMMAND" in
   register-plugin) cmd_register_plugin ;;
   status)          cmd_status ;;
   raft-status)     cmd_raft_status ;;
+  gen-backup-token) cmd_gen_backup_token ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "$@" ;;
   help)            cmd_help ;;
