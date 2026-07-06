@@ -343,15 +343,26 @@ cmd_vault_unseal() {
       "${addr}/v1/sys/unseal" > /dev/null 2>&1
   done
 
-  # Final check
+  # Final check — on HA followers, unseal completes asynchronously: after the
+  # last key is submitted, a follower still has to finish the Raft join
+  # handshake with the leader before seal-status flips to false. The leader
+  # unseals synchronously, which is why it alone passed a single immediate
+  # check. Poll for a short window instead of checking once.
   local sealed
-  sealed=$(curl_vault "${addr}/v1/sys/seal-status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sealed','unknown'))" 2>/dev/null || echo "unknown")
-  if [ "$sealed" = "False" ] || [ "$sealed" = "false" ]; then
-    ok "Vault is now unsealed!"
-  else
-    error "Vault is still sealed. Please verify your unseal keys."
-    exit 1
-  fi
+  for i in $(seq 1 15); do
+    sealed=$(curl_vault "${addr}/v1/sys/seal-status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sealed','unknown'))" 2>/dev/null || echo "unknown")
+    if [ "$sealed" = "False" ] || [ "$sealed" = "false" ]; then
+      ok "Vault is now unsealed!"
+      return
+    fi
+    info "Waiting for unseal to complete... (${i}/15)"
+    sleep 2
+  done
+
+  error "Vault is still sealed. Please verify your unseal keys."
+  error "If this is a follower still joining the Raft cluster, wait a moment"
+  error "and re-check with: ./setup-ha.sh status"
+  exit 1
 }
 
 cmd_register_plugin() {
