@@ -416,17 +416,83 @@ Root Token: hvs.xxxxxxxxxxxxx
 2. 创建一个绑定该策略的 **periodic**（`period=720h`）**orphan** token，并去掉默认策略；
 3. 打印 token 并写入 `backups/backup.token`（权限 `600`）。
 
-配置 crontab（该 token 是 periodic，需定期续期才不过期；续期失败不阻断当次备份）：
+该 token 是 periodic，需定期续期才不过期；续期失败不阻断当次备份。先在 `deploy_ha/` 下建一个包装脚本：
 
 ```bash
-# 每天凌晨 2 点在 leader 上：先尽力续期备份 token，再备份
-0 2 * * * cd /path/to/deploy_ha && T=$(cat backups/backup.token) \
-  && { curl -s --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
-       https://127.0.0.1:8200/v1/auth/token/renew-self -o /dev/null || true; } \
-  && VAULT_TOKEN=$T ./setup-ha.sh backup >> logs/backup.log 2>&1
+cat > cron-backup.sh <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+cd "$(dirname "$0")"
+
+T=$(cat backups/backup.token)
+
+# 尽力续期（失败不阻断当次备份）
+curl -sf --cacert tls/ca.pem -H "X-Vault-Token: $T" \
+  -X POST https://127.0.0.1:8200/v1/auth/token/renew-self -o /dev/null \
+  || echo "[warn] token renew-self failed, continuing with backup"
+
+VAULT_TOKEN=$T ./setup-ha.sh backup
+EOF
+chmod 700 cron-backup.sh
 ```
 
-> `TLS_DISABLE=true` 时把 `https://` 改为 `http://` 并去掉 `--cacert tls/ca.pem`。
+再配置 crontab —— **整条命令必须写在一行**，cron 不支持反斜杠续行：
+
+```cron
+# 每天凌晨 2 点在 leader 上执行
+0 2 * * * /path/to/deploy_ha/cron-backup.sh >> /path/to/deploy_ha/logs/backup.log 2>&1
+```
+
+> ⚠️ cron 的每一行都是一条独立任务，行尾的 `\` **不会**续接下一行；换行后的内容会被当成新任务的分钟字段，报 `bad minute`。
+>
+> ⚠️ crontab 中的 `%` 是特殊字符（会被转成换行），命令里若需要 `%`（如 `date +%F`）必须写成 `\%`。把命令放进脚本可一并规避这两个坑。
+
+> `TLS_DISABLE=true` 时把脚本里的 `https://` 改为 `http://` 并去掉 `--cacert tls/ca.pem`。
+
+### 查看 token 有效期
+
+```bash
+# 查看备份 token（读 backups/backup.token）
+./setup-ha.sh token-status --backup-token
+
+# 查看任意 token（交互式输入，不回显）
+./setup-ha.sh token-status
+```
+
+输出示例：
+
+```
+=== Token Status ===
+
+  Display name:  token-raft-snapshot-backup
+  Accessor:      hmac-abc...
+  Policies:      raft-snapshot
+  Orphan:        True
+  Renewable:     True
+  Issued at:     2026-07-09T02:00:00Z
+
+  TTL remaining: 29d 23h 43m  (2591000s)
+  Expires at:    2026-08-08T02:00:00Z
+  Period:        30d  (renew-self resets TTL back to this)
+  Max TTL:       unlimited (no explicit max)
+```
+
+| 字段 | 含义 |
+|------|------|
+| `TTL remaining` | 距离过期还剩多久（每次 `renew-self` 成功后重置回 `Period`） |
+| `Period` | periodic token 的续期周期，备份 token 为 `30d`（720h） |
+| `Max TTL` | `unlimited` 表示无硬性上限，可无限续期 |
+| `Renewable` | 为 `false` 时 token 到期即失效，无法延长 |
+
+命令会在异常时给出 `[WARN]` 提示，最需要留意这条：
+
+- **`TTL is below half the period`** —— 说明 cron 里的续期一直在失败。去 `logs/backup.log` 里 grep `token renew-self failed` 确认。
+
+token 已过期 / 被吊销时返回 HTTP 403，退出码非 0；重新生成即可：`./setup-ha.sh gen-backup-token`。
+
+> 该命令走 `auth/token/lookup-self`。这是 Vault 的内置豁免路径，任何有效 token 都能查询自己，因此最小权限的 `raft-snapshot` 策略无需增加任何规则。
+>
+> token 只从交互式输入、`VAULT_TOKEN` 环境变量或 `backups/backup.token` 读取，**不接受命令行参数** —— 否则 token 会出现在 `ps` 输出和 shell history 里。
 
 > 若环境已安装 vault CLI，也可等价手动创建（策略同上两条）：
 > ```bash

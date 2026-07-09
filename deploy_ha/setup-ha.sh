@@ -16,6 +16,7 @@
 #   status          Show this node's Vault status
 #   raft-status     Show Raft cluster member list
 #   gen-backup-token Create a least-privilege backup token (run on leader)
+#   token-status    Show a token's TTL, policies and renewal health
 #   backup          Create a Raft snapshot backup (online, no downtime)
 #   restore         Restore Vault from a Raft snapshot
 #   help            Show this help message
@@ -601,8 +602,148 @@ path "auth/token/renew-self" {
   echo ""
   echo -e "${YELLOW}Next steps:${NC}"
   echo "  - Unattended backup:  VAULT_TOKEN=\$(cat ${token_file}) ./setup-ha.sh backup"
+  echo "  - Check its TTL:      ./setup-ha.sh token-status --backup-token"
   echo "  - This token is periodic (720h); renew it on a schedule so it never expires."
   echo "  - Full crontab example (renew + backup): see DEPLOY_HA.md -> 自动备份"
+}
+
+cmd_token_status() {
+  local addr
+  addr="$(vault_addr)"
+  local token_file="backups/backup.token"
+
+  # Token source: --backup-token reads the saved backup token, VAULT_TOKEN wins
+  # over the prompt. Never accept a token as a positional argument: it would be
+  # visible in `ps` output and land in shell history.
+  local vault_token=""
+  if [ "${1:-}" = "--backup-token" ]; then
+    if [ ! -f "$token_file" ]; then
+      error "Backup token not found: ${token_file}"
+      error "Create one with: ./setup-ha.sh gen-backup-token"
+      exit 1
+    fi
+    vault_token=$(cat "$token_file")
+    info "Using backup token from ${token_file}"
+  else
+    vault_token="${VAULT_TOKEN:-}"
+    if [ -z "$vault_token" ]; then
+      echo -n "Enter Vault token to inspect: "
+      read -r -s vault_token
+      echo ""
+    fi
+  fi
+  if [ -z "$vault_token" ]; then
+    error "No token provided."
+    exit 1
+  fi
+
+  # lookup-self is an unauthenticated-policy path: any valid token may inspect
+  # itself, so this works with the least-privilege backup token as-is.
+  local tmp http_code body
+  tmp=$(mktemp)
+  # On a connection failure curl already emits "000" via -w, so do not append
+  # another one with `|| echo 000` -- that yields the unmatchable "000\n000".
+  http_code=$(curl_vault -X GET \
+    -H "X-Vault-Token: ${vault_token}" \
+    -o "$tmp" -w "%{http_code}" \
+    "${addr}/v1/auth/token/lookup-self" 2>/dev/null || true)
+  http_code="${http_code:-000}"
+  body=$(cat "$tmp")
+  rm -f "$tmp"
+
+  case "$http_code" in
+    200) ;;
+    403)
+      error "Token is invalid, expired, or revoked (HTTP 403)."
+      [ "${1:-}" = "--backup-token" ] && error "Regenerate it with: ./setup-ha.sh gen-backup-token"
+      exit 1
+      ;;
+    503)
+      error "Vault is sealed (HTTP 503). Unseal first: ./setup-ha.sh vault-unseal"
+      exit 1
+      ;;
+    000)
+      error "Cannot reach Vault at ${addr}. Is the container running?"
+      exit 1
+      ;;
+    *)
+      error "Token lookup failed (HTTP ${http_code})."
+      echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"
+      exit 1
+      ;;
+  esac
+
+  echo -e "\n${YELLOW}=== Token Status ===${NC}\n"
+  printf '%s' "$body" | python3 -c '
+import sys, json
+
+d = json.load(sys.stdin).get("data", {})
+
+def human(secs):
+    if secs <= 0:
+        return "0s"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, sec = divmod(rem, 60)
+    parts = []
+    if days:  parts.append(f"{days}d")
+    if hours: parts.append(f"{hours}h")
+    if mins:  parts.append(f"{mins}m")
+    if not parts: parts.append(f"{sec}s")
+    return " ".join(parts)
+
+ttl        = d.get("ttl", 0)
+period     = d.get("period", 0)
+max_ttl    = d.get("explicit_max_ttl", 0)
+renewable  = d.get("renewable", False)
+expire     = d.get("expire_time")
+policies   = d.get("policies", [])
+num_uses   = d.get("num_uses", 0)
+
+name     = d.get("display_name") or "-"
+accessor = d.get("accessor") or "-"
+pol_str  = ", ".join(policies) if policies else "-"
+orphan   = d.get("orphan", False)
+issued   = d.get("issue_time") or "-"
+
+print(f"  Display name:  {name}")
+print(f"  Accessor:      {accessor}")
+print(f"  Policies:      {pol_str}")
+print(f"  Orphan:        {orphan}")
+print(f"  Renewable:     {renewable}")
+print(f"  Issued at:     {issued}")
+print()
+
+if expire is None:
+    print("  TTL:           never expires (root token or period-less service token)")
+else:
+    print(f"  TTL remaining: {human(ttl)}  ({ttl}s)")
+    print(f"  Expires at:    {expire}")
+
+if period:
+    print(f"  Period:        {human(period)}  (renew-self resets TTL back to this)")
+max_ttl_str = human(max_ttl) if max_ttl else "unlimited (no explicit max)"
+print(f"  Max TTL:       {max_ttl_str}")
+if num_uses:
+    print(f"  Uses left:     {num_uses}")
+
+warnings = []
+if expire is not None and ttl <= 0:
+    warnings.append("Token has already expired.")
+elif expire is not None and ttl < 86400:
+    warnings.append(f"Expires in under 24h ({human(ttl)}). Renew it now.")
+if period and renewable and ttl < period // 2:
+    warnings.append("TTL is below half the period - scheduled renew-self is likely failing. "
+                    "Check logs/backup.log for: token renew-self failed")
+if expire is not None and not renewable:
+    warnings.append("Token is NOT renewable; it will expire and cannot be extended.")
+
+if warnings:
+    print()
+    for w in warnings:
+        print(f"  [WARN] {w}")
+'
+  echo ""
 }
 
 cmd_backup() {
@@ -737,6 +878,7 @@ cmd_help() {
   echo "  status           Show this node's Vault status"
   echo "  raft-status      Show Raft cluster member list"
   echo "  gen-backup-token Create a least-privilege token for unattended backups"
+  echo "  token-status     Show a token's TTL and policies (add --backup-token to read backups/backup.token)"
   echo "  backup           Create a Raft snapshot backup (online, no downtime)"
   echo "  restore          Restore Vault from a Raft snapshot"
   echo "  help             Show this help message"
@@ -771,6 +913,7 @@ case "$COMMAND" in
   status)          cmd_status ;;
   raft-status)     cmd_raft_status ;;
   gen-backup-token) cmd_gen_backup_token ;;
+  token-status)    cmd_token_status "${2:-}" ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "$@" ;;
   help)            cmd_help ;;
