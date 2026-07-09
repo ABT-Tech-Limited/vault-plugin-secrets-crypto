@@ -18,7 +18,10 @@
 #   gen-backup-token Create a least-privilege backup token (run on leader)
 #   token-status    Show a token's TTL, policies and renewal health
 #   backup          Create a Raft snapshot backup (online, no downtime)
-#   restore         Restore Vault from a Raft snapshot
+#   restore         Restore a snapshot into this cluster (seal check enforced)
+#   restore-force   Restore a snapshot into a fresh cluster (disaster recovery)
+#   list-keys       List crypto plugin keys
+#   key-info        Show one crypto key by external_id
 #   help            Show this help message
 
 set -euo pipefail
@@ -819,11 +822,31 @@ cmd_backup() {
   fi
 }
 
-cmd_restore() {
-  local snapshot_file="${2:-}"
+# Shared implementation for `restore` and `restore-force`.
+#
+# restore       -> sys/storage/raft/snapshot
+#                  Vault verifies the snapshot's sealed hash file against the
+#                  current seal, which rejects a snapshot from a *different*
+#                  cluster. Correct for rolling back data within one cluster.
+# restore-force -> sys/storage/raft/snapshot-force
+#                  Bypasses that check. Required to rebuild a destroyed cluster
+#                  on fresh servers, where the new cluster's Shamir keys cannot
+#                  match the snapshot's. Afterwards every node seals itself and
+#                  must be unsealed with the ORIGINAL cluster's unseal keys.
+_restore_snapshot() {
+  local snapshot_file="$1"
+  local force="$2"
+
+  local endpoint="sys/storage/raft/snapshot"
+  [ "$force" = true ] && endpoint="sys/storage/raft/snapshot-force"
+
   if [ -z "$snapshot_file" ]; then
-    error "Usage: ./setup-ha.sh restore <snapshot-file>"
-    error "Example: ./setup-ha.sh restore backups/vault-backup-20250215_120000.snap"
+    if [ "$force" = true ]; then
+      error "Usage: ./setup-ha.sh restore-force <snapshot-file>"
+    else
+      error "Usage: ./setup-ha.sh restore <snapshot-file>"
+    fi
+    error "Example: backups/vault-backup-20250215_120000.snap"
     exit 1
   fi
 
@@ -855,31 +878,207 @@ cmd_restore() {
   size=$(du -h "$snapshot_file" | cut -f1)
   warn "This will OVERWRITE all Vault data with snapshot: ${snapshot_file} (${size})"
   warn "This affects the ENTIRE cluster, not just this node."
-  echo -n "Are you sure? (yes/no): "
-  read -r confirm
-  if [ "$confirm" != "yes" ]; then
-    info "Restore cancelled."
-    return
+
+  local confirm
+  if [ "$force" = true ]; then
+    echo ""
+    warn "FORCE mode: the seal-consistency check is bypassed."
+    warn "Only use this to rebuild a destroyed cluster on fresh servers."
+    warn "After the restore ALL nodes will seal. You will then need the"
+    warn "ORIGINAL cluster's unseal keys -- the ones matching this snapshot."
+    warn "Without them the restored data is unrecoverable."
+    echo ""
+    echo -n "Type FORCE to proceed: "
+    read -r confirm
+    if [ "$confirm" != "FORCE" ]; then
+      info "Restore cancelled."
+      return
+    fi
+  else
+    echo -n "Are you sure? (yes/no): "
+    read -r confirm
+    if [ "$confirm" != "yes" ]; then
+      info "Restore cancelled."
+      return
+    fi
   fi
 
-  info "Restoring from Raft snapshot..."
-  local http_code
+  info "Restoring from Raft snapshot via ${endpoint}..."
+  local tmp http_code body
+  tmp=$(mktemp)
   http_code=$(curl_vault -X POST \
     -H "X-Vault-Token: ${vault_token}" \
     --data-binary @"${snapshot_file}" \
-    -o /dev/null \
-    -w "%{http_code}" \
-    "${addr}/v1/sys/storage/raft/snapshot" 2>/dev/null)
+    -o "$tmp" -w "%{http_code}" \
+    "${addr}/v1/${endpoint}" 2>/dev/null || true)
+  http_code="${http_code:-000}"
+  body=$(cat "$tmp")
+  rm -f "$tmp"
 
   if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
     ok "Snapshot restored successfully!"
-    warn "Vault will restart automatically. You may need to unseal all nodes again (Shamir mode)."
-    info "Run: ./setup-ha.sh status"
+    if [ "$force" = true ]; then
+      echo ""
+      warn "Every node is now sealed. Unseal all 3 with the ORIGINAL cluster's"
+      warn "unseal keys (not the ones from the temporary cluster's vault-init)."
+      info "On each node: ./setup-ha.sh vault-unseal"
+      info "Then verify:  ./setup-ha.sh raft-status && ./setup-ha.sh list-keys"
+    else
+      warn "Vault will restart automatically. You may need to unseal all nodes again (Shamir mode)."
+      info "Run: ./setup-ha.sh status"
+    fi
+    return
+  fi
+
+  error "Restore failed (HTTP ${http_code})."
+  [ -n "$body" ] && { echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"; }
+
+  # Vault's own hint when the snapshot belongs to a different cluster.
+  if [ "$force" != true ] && echo "$body" | grep -q "snapshot-force"; then
+    echo ""
+    error "This snapshot was taken from a cluster with different unseal keys."
+    error "To rebuild a destroyed cluster on fresh servers, use:"
+    error "  ./setup-ha.sh restore-force ${snapshot_file}"
+    error "See DEPLOY_HA.md -> 灾难恢复 before doing so."
   else
-    error "Restore failed (HTTP ${http_code}). Check your token permissions."
     error "Required policy: path \"sys/storage/raft/snapshot\" { capabilities = [\"create\", \"update\"] }"
+  fi
+  exit 1
+}
+
+cmd_restore() {
+  _restore_snapshot "${1:-}" false
+}
+
+cmd_restore_force() {
+  _restore_snapshot "${1:-}" true
+}
+
+# ---- Crypto plugin inspection (useful to verify a restore) ----
+
+cmd_list_keys() {
+  local addr mount_path
+  addr="$(vault_addr)"
+  mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
+
+  local vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ]; then
+    echo -n "Enter Vault token: "
+    read -r -s vault_token
+    echo ""
+  fi
+
+  local tmp http_code body
+  tmp=$(mktemp)
+  http_code=$(curl_vault -X GET \
+    -H "X-Vault-Token: ${vault_token}" \
+    -o "$tmp" -w "%{http_code}" \
+    "${addr}/v1/${mount_path}/keys?list=true" 2>/dev/null || true)
+  http_code="${http_code:-000}"
+  body=$(cat "$tmp")
+  rm -f "$tmp"
+
+  case "$http_code" in
+    200) ;;
+    # Vault returns 404 for an empty LIST, which is not an error here.
+    404)
+      echo -e "\n${YELLOW}=== Crypto Keys (mount: ${mount_path}) ===${NC}\n"
+      info "  No keys found (the mount exists but holds no keys)."
+      echo ""
+      return
+      ;;
+    403)
+      error "Permission denied (HTTP 403). The token needs list on ${mount_path}/keys."
+      exit 1
+      ;;
+    503)
+      error "Vault is sealed (HTTP 503). Unseal first: ./setup-ha.sh vault-unseal"
+      exit 1
+      ;;
+    000)
+      error "Cannot reach Vault at ${addr}. Is the container running?"
+      exit 1
+      ;;
+    *)
+      error "Failed to list keys (HTTP ${http_code})."
+      error "Is the plugin mounted at '${mount_path}'? Check: ./setup-ha.sh status"
+      [ -n "$body" ] && { echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"; }
+      exit 1
+      ;;
+  esac
+
+  echo -e "\n${YELLOW}=== Crypto Keys (mount: ${mount_path}) ===${NC}\n"
+  printf '%s' "$body" | python3 -c '
+import sys, json
+keys = json.load(sys.stdin).get("data", {}).get("keys", [])
+print(f"  Total keys: {len(keys)}")
+print()
+for k in keys:
+    print(f"  {k}")
+'
+  echo ""
+  info "Inspect one key: ./setup-ha.sh key-info <external_id>"
+}
+
+cmd_key_info() {
+  local external_id="$1"
+  if [ -z "$external_id" ]; then
+    error "Usage: ./setup-ha.sh key-info <external_id>"
+    error "List available IDs with: ./setup-ha.sh list-keys"
     exit 1
   fi
+
+  local addr mount_path
+  addr="$(vault_addr)"
+  mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
+
+  local vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ]; then
+    echo -n "Enter Vault token: "
+    read -r -s vault_token
+    echo ""
+  fi
+
+  local tmp http_code body
+  tmp=$(mktemp)
+  http_code=$(curl_vault -X GET \
+    -H "X-Vault-Token: ${vault_token}" \
+    -o "$tmp" -w "%{http_code}" \
+    "${addr}/v1/${mount_path}/keys/${external_id}" 2>/dev/null || true)
+  http_code="${http_code:-000}"
+  body=$(cat "$tmp")
+  rm -f "$tmp"
+
+  if [ "$http_code" != "200" ]; then
+    error "Failed to read key '${external_id}' (HTTP ${http_code})."
+    [ -n "$body" ] && { echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"; }
+    exit 1
+  fi
+
+  echo -e "\n${YELLOW}=== Key: ${external_id} ===${NC}\n"
+  printf '%s' "$body" | python3 -c '
+import sys, json
+d = json.load(sys.stdin).get("data", {})
+meta = d.get("metadata") or {}
+name    = d.get("name") or "-"
+ext_id  = d.get("external_id") or "-"
+curve   = d.get("curve") or "-"
+pub_key = d.get("public_key") or "-"
+created = d.get("created_at") or "-"
+print(f"  Name:        {name}")
+print(f"  External ID: {ext_id}")
+print(f"  Curve:       {curve}")
+print(f"  Public key:  {pub_key}")
+print(f"  Created at:  {created}")
+if meta:
+    print("  Metadata:")
+    for k, v in meta.items():
+        print(f"    {k}: {v}")
+'
+  echo ""
+  # The plugin derives public_key from the stored private key on every read, so a
+  # successful read proves the key material decrypted correctly after a restore.
+  ok "Public key derived from stored private key -- key material decrypts correctly."
 }
 
 cmd_help() {
@@ -907,7 +1106,15 @@ cmd_help() {
   echo "                   (--policy-only rewrites the policy, keeps the existing token)"
   echo "  token-status     Show a token's TTL and policies (add --backup-token to read backups/backup.token)"
   echo "  backup           Create a Raft snapshot backup (online, no downtime)"
-  echo "  restore          Restore Vault from a Raft snapshot"
+  echo "  restore          Restore a snapshot into THIS cluster (seal check enforced)"
+  echo "  list-keys        List crypto plugin keys (verifies the plugin mount)"
+  echo "  key-info         Show one key by external_id (verifies key material decrypts)"
+  echo ""
+  echo "Disaster recovery:"
+  echo "  restore-force    Restore a snapshot into a FRESH cluster (bypasses seal check)"
+  echo "                   Requires the ORIGINAL cluster's unseal keys afterwards."
+  echo "                   See DEPLOY_HA.md -> 灾难恢复"
+  echo ""
   echo "  help             Show this help message"
 }
 
@@ -942,7 +1149,10 @@ case "$COMMAND" in
   gen-backup-token) cmd_gen_backup_token "${2:-}" ;;
   token-status)    cmd_token_status "${2:-}" ;;
   backup)          cmd_backup ;;
-  restore)         cmd_restore "$@" ;;
+  restore)         cmd_restore "${2:-}" ;;
+  restore-force)   cmd_restore_force "${2:-}" ;;
+  list-keys)       cmd_list_keys ;;
+  key-info)        cmd_key_info "${2:-}" ;;
   help)            cmd_help ;;
   *)
     error "Unknown command: ${COMMAND}"

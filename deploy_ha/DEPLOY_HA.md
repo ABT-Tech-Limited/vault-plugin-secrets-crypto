@@ -19,6 +19,7 @@
 - [备份与恢复](#备份与恢复)
 - [日常运维](#日常运维)
 - [故障转移](#故障转移)
+- [灾难恢复](#灾难恢复)
 - [安全加固清单](#安全加固清单)
 
 ---
@@ -387,7 +388,7 @@ Root Token: hvs.xxxxxxxxxxxxx
 # 输出：backups/vault-backup-YYYYMMDD_HHMMSS.snap
 ```
 
-### 恢复
+### 恢复（同一集群内回滚）
 
 恢复操作会影响 **整个集群**：
 
@@ -396,6 +397,26 @@ Root Token: hvs.xxxxxxxxxxxxx
 ```
 
 恢复后所有节点可能需要重新解封（Shamir 模式）。
+
+> `restore` 会让 Vault 校验快照的 seal 一致性，**拒绝**来自其他集群的快照。这层保护是有意保留的，防止误把 A 集群的快照灌进 B 集群。
+>
+> 集群整体损毁、要在全新服务器上重建时，这个校验必然失败（新集群的 Shamir key 不可能和快照匹配）。那种情况见 [灾难恢复](#灾难恢复)。
+
+### 验证恢复结果
+
+恢复完成后，除了 `raft-status` 看集群成员，还应确认插件数据真的回来了：
+
+```bash
+# 列出所有 key 的 external_id
+./setup-ha.sh list-keys
+
+# 抽查一个 key 的详情
+./setup-ha.sh key-info wallet:eth:main
+```
+
+`key-info` 是比 `list-keys` 更强的验证：插件每次读取都会**从存储的私钥现算 public_key**，所以它能返回正确的公钥，就证明 key 材料被 Vault 的 barrier key 正确解密了 —— 而不只是「条目还在」。
+
+两个命令都读 `PLUGIN_MOUNT_PATH`（默认 `crypto`），需要一个对该挂载点有 list / read 权限的 token。
 
 ### 自动备份
 
@@ -565,10 +586,116 @@ docker compose -f docker-compose.ha.yml logs -f
 | 1 节点宕机 | 集群正常运行（2/3 quorum） | 重启节点 + 解封 |
 | 2 节点宕机 | 集群不可用（丢失 quorum） | 恢复至少 1 个节点 + 解封 |
 | 3 节点全部宕机 | 集群不可用 | 逐个重启 + 解封 |
+| 3 台服务器**永久损毁** | 数据仅存于快照 | 见 [灾难恢复](#灾难恢复) |
 | Leader 宕机 | 自动选举新 Leader（几秒） | 透明切换 |
 | 网络分区 | 多数侧正常，少数侧只读 | 恢复网络 |
 
 **最低存活节点数：2（3 节点集群）**
+
+---
+
+## 灾难恢复
+
+三台服务器全部永久损毁（实例被销毁、EBS 卷丢失、整个 AZ 不可恢复）时，在全新服务器上重建集群的流程。
+
+### 先决条件：缺一不可
+
+Shamir 模式下，快照里的数据是用**旧集群的 master key** 加密的。恢复的前提是你同时持有以下三样：
+
+| # | 东西 | 存放位置 | 丢失后果 |
+|---|------|---------|---------|
+| 1 | **快照文件** `.snap` | **必须在三台机器之外**（如 S3） | 数据全部丢失 |
+| 2 | **旧集群的 unseal keys** | `vault-init-keys.json`，分发给不同管理员 | 快照是无法解密的砖，**无任何补救手段** |
+| 3 | **旧集群的 root token** | 同上 | 需要另有高权限 token |
+
+第 2 条是**硬约束**。Vault 源码 `vault/raft.go` 的 `raftSnapshotRestoreCallback` 里，恢复后若 keyring 解不开：
+
+```go
+case SealConfigTypeShamir:
+    // If we are a shamir seal we can't do anything. Just
+    // seal all nodes.
+```
+
+> 所以「把 unseal keys 和快照存在同一批服务器上」等于没有备份。快照推 S3（见 [Shamir 解封在 AWS 上的注意事项](#7-shamir-解封在-aws-上的注意事项)），unseal keys 离线分发给不同管理员。
+
+### 恢复流程
+
+#### 第一步：拉起一个全新的、临时的集群
+
+在 3 台新服务器上，按 [部署流程](#部署流程) 正常走一遍：
+
+```bash
+./setup-ha.sh init-dirs
+# 节点 1：./setup-ha.sh gen-ca ，然后把 ca.pem / ca-key.pem 分发到节点 2、3
+./setup-ha.sh gen-cert
+./setup-ha.sh prepare-config
+./setup-ha.sh start
+
+# 节点 1
+./setup-ha.sh vault-init      # 产生【临时】unseal keys + root token
+# 三台都执行
+./setup-ha.sh vault-unseal    # 用【临时】unseal keys
+```
+
+要点：
+
+- `.env` 里的 `VAULT_FQDN` / `VAULT_SAN_IP` / `VAULT_NODE_*_ADDR` 换成新机器的私网 IP
+- **CA 可以是全新的**，TLS 和 Vault 的数据加密无关
+- **node ID 可以复用** `vault-1/2/3`（原因见下方「为什么 peer 配置不会被覆盖」）
+- 这一步产生的临时 unseal keys 和 root token，唯一用途是把快照灌进去，灌完即作废
+- **不要执行 `register-plugin`** —— 插件注册信息在快照里，会被一起恢复
+
+#### 第二步：强制恢复快照
+
+```bash
+# 用【临时】root token
+VAULT_TOKEN=<临时 root token> \
+  ./setup-ha.sh restore-force backups/vault-backup-YYYYMMDD_HHMMSS.snap
+```
+
+命令会要求你输入 `FORCE` 二次确认。它打的是 `sys/storage/raft/snapshot-force` 端点，**绕过** seal 一致性校验 —— 普通的 `restore` 在这里必然失败，Vault 会明确告诉你：
+
+```
+could not verify hash file, possibly the snapshot is using a different
+set of unseal keys; use the snapshot-force API to bypass this check
+```
+
+#### 第三步：用「旧」unseal keys 解封三台
+
+恢复一完成，**三个节点会全部自动 seal**。这是预期行为，不是故障 —— 此刻存储里的 keyring 已经是旧集群的，新集群的 master key 解不开它。
+
+```bash
+# 每台都执行，输入【旧集群】的 3 个 unseal key
+./setup-ha.sh vault-unseal
+```
+
+解封后集群就是旧集群了：**旧 root token 生效，临时的那套彻底作废**。
+
+#### 第四步：验证
+
+```bash
+./setup-ha.sh raft-status                 # 3 个节点，1 个 leader
+./setup-ha.sh list-keys                   # key 数量应与灾难前一致
+./setup-ha.sh key-info <某个 external_id>  # 能算出 public_key = 私钥解密正常
+```
+
+#### 第五步：收尾
+
+- 删除新节点 1 上那份**临时**的 `vault-init-keys.json`，避免日后与真正的 keys 混淆
+- 备份 token 也在快照里恢复了，但 `backups/backup.token` 文件不在。要么从旧机器的备份里取回该文件，要么重新签发：`./setup-ha.sh gen-backup-token`
+- 客户端换用新集群的 `ca.pem`，并把地址指向新的私网 IP
+
+### 两个容易踩的点
+
+**为什么 peer 配置不会被覆盖。** 新集群的三个 node ID 和地址会被保留，不会变回旧集群的 IP。这一点由 `hashicorp/raft` 的 `Restore()` 明确保证：
+
+> We will use the current Raft configuration, not the one from the snapshot, so that we can restore into a new cluster.
+
+**插件二进制必须是同一个。** 插件的注册信息（名字、命令、SHA-256）在快照里会被一起恢复。新机器 `plugins/` 目录下的二进制若 SHA-256 对不上，插件挂载会加载失败，而此时 `register-plugin` 不该重跑。本仓库已将二进制纳入 git 跟踪，checkout 同一个 commit 即可保证一致。
+
+### 演练
+
+**这套流程必须在真实环境演练过，才算数。** 拿 3 台临时机器，用一份真实快照走一遍全流程，确认 `list-keys` 的数量和 `key-info` 的公钥与灾难前一致。别等真出事才第一次执行 —— 那时你会同时面对生产中断和一个没验证过的手册。
 
 ---
 
@@ -584,5 +711,7 @@ docker compose -f docker-compose.ha.yml logs -f
 - [ ] 服务器间使用内网通信
 - [ ] 定期轮换 TLS 证书
 - [ ] 每日自动备份（Raft 快照）
-- [ ] 定期测试恢复流程
+- [ ] 快照推送到异地存储（S3），**不与 Vault 节点同生共死**
+- [ ] Unseal keys 离线保管，**与快照分开存放**（两者都丢 = 数据永久损毁）
+- [ ] 定期演练 [灾难恢复](#灾难恢复) 全流程（含 `restore-force` + 旧 key 解封）
 - [ ] 监控集群健康状态（Prometheus + `/v1/sys/health`）
