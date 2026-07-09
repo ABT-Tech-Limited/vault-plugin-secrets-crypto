@@ -530,8 +530,14 @@ cmd_gen_backup_token() {
   addr="$(vault_addr)"
   local policy_name="raft-snapshot"
   local token_file="backups/backup.token"
+  local policy_only=false
+  [ "${1:-}" = "--policy-only" ] && policy_only=true
 
-  info "Generating a least-privilege backup token via the Vault API (no vault CLI needed)..."
+  if [ "$policy_only" = true ]; then
+    info "Rewriting policy '${policy_name}' only; no new token will be created."
+  else
+    info "Generating a least-privilege backup token via the Vault API (no vault CLI needed)..."
+  fi
 
   # Root token (or any token with sudo on auth/token/create): prefer env, else prompt
   local vault_token="${VAULT_TOKEN:-}"
@@ -545,11 +551,15 @@ cmd_gen_backup_token() {
     exit 1
   fi
 
-  # 1. Write the least-privilege policy: read Raft snapshots + renew own token.
-  #    renew-self is required so this periodic token can keep renewing itself
-  #    without relying on the (broader) default policy.
-  info "Writing policy '${policy_name}' (snapshot read + renew-self)..."
+  # 1. Write the least-privilege policy: read Raft snapshots + inspect and renew
+  #    own token. lookup-self and renew-self are NOT ACL-exempt -- they are
+  #    granted by the built-in `default` policy, which this token opts out of via
+  #    no_default_policy, so they must be granted explicitly here.
+  info "Writing policy '${policy_name}' (snapshot read + lookup-self + renew-self)..."
   local policy_hcl='path "sys/storage/raft/snapshot" {
+  capabilities = ["read"]
+}
+path "auth/token/lookup-self" {
   capabilities = ["read"]
 }
 path "auth/token/renew-self" {
@@ -559,17 +569,28 @@ path "auth/token/renew-self" {
   policy_payload=$(printf '%s' "$policy_hcl" | python3 -c 'import json,sys; print(json.dumps({"policy": sys.stdin.read()}))')
 
   local code
+  # curl already emits "000" via -w on connection failure; do not append another.
   code=$(curl_vault -X PUT \
     -H "X-Vault-Token: ${vault_token}" \
     -d "$policy_payload" \
     -o /dev/null -w "%{http_code}" \
-    "${addr}/v1/sys/policies/acl/${policy_name}" 2>/dev/null || echo "000")
+    "${addr}/v1/sys/policies/acl/${policy_name}" 2>/dev/null || true)
+  code="${code:-000}"
   if [ "$code" != "204" ] && [ "$code" != "200" ]; then
     error "Failed to write policy '${policy_name}' (HTTP ${code})."
     error "The token needs permission to write sys/policies/acl (root or equivalent)."
     exit 1
   fi
   ok "Policy '${policy_name}' written"
+
+  # Policies are resolved by name on every request, so rewriting the policy is
+  # enough to fix an already-issued token -- no need to mint a replacement.
+  if [ "$policy_only" = true ]; then
+    echo ""
+    ok "Existing tokens bound to '${policy_name}' picked up the new rules immediately."
+    info "Verify with: ./setup-ha.sh token-status --backup-token"
+    return
+  fi
 
   # 2. Create an orphan, periodic token bound to that policy, with no default policy.
   #    no_parent  -> survives revocation of the root token used here (orphan)
@@ -637,8 +658,8 @@ cmd_token_status() {
     exit 1
   fi
 
-  # lookup-self is an unauthenticated-policy path: any valid token may inspect
-  # itself, so this works with the least-privilege backup token as-is.
+  # lookup-self is NOT ACL-exempt: read access comes from the built-in `default`
+  # policy. A token created with no_default_policy needs it granted explicitly.
   local tmp http_code body
   tmp=$(mktemp)
   # On a connection failure curl already emits "000" via -w, so do not append
@@ -654,8 +675,13 @@ cmd_token_status() {
   case "$http_code" in
     200) ;;
     403)
-      error "Token is invalid, expired, or revoked (HTTP 403)."
-      [ "${1:-}" = "--backup-token" ] && error "Regenerate it with: ./setup-ha.sh gen-backup-token"
+      # Vault returns the same "permission denied" for a bad token and for a
+      # valid token lacking read on auth/token/lookup-self, so name both causes.
+      error "HTTP 403 on auth/token/lookup-self. Either:"
+      error "  a) the token is invalid, expired or revoked; or"
+      error "  b) the token's policy does not grant read on auth/token/lookup-self."
+      error "     (b) applies to backup tokens issued before that rule was added."
+      error "     Fix without reissuing the token: ./setup-ha.sh gen-backup-token --policy-only"
       exit 1
       ;;
     503)
@@ -878,6 +904,7 @@ cmd_help() {
   echo "  status           Show this node's Vault status"
   echo "  raft-status      Show Raft cluster member list"
   echo "  gen-backup-token Create a least-privilege token for unattended backups"
+  echo "                   (--policy-only rewrites the policy, keeps the existing token)"
   echo "  token-status     Show a token's TTL and policies (add --backup-token to read backups/backup.token)"
   echo "  backup           Create a Raft snapshot backup (online, no downtime)"
   echo "  restore          Restore Vault from a Raft snapshot"
@@ -912,7 +939,7 @@ case "$COMMAND" in
   register-plugin) cmd_register_plugin ;;
   status)          cmd_status ;;
   raft-status)     cmd_raft_status ;;
-  gen-backup-token) cmd_gen_backup_token ;;
+  gen-backup-token) cmd_gen_backup_token "${2:-}" ;;
   token-status)    cmd_token_status "${2:-}" ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "$@" ;;

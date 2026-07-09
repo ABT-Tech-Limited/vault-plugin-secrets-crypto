@@ -408,11 +408,13 @@ Root Token: hvs.xxxxxxxxxxxxx
 
 它会：
 
-1. 写入策略 `raft-snapshot`——只允许读取 Raft 快照 + 续期自身 token：
+1. 写入策略 `raft-snapshot`——只允许读取 Raft 快照 + 查询/续期自身 token：
    ```hcl
    path "sys/storage/raft/snapshot" { capabilities = ["read"] }
+   path "auth/token/lookup-self"    { capabilities = ["read"] }
    path "auth/token/renew-self"     { capabilities = ["update"] }
    ```
+   > `lookup-self` 和 `renew-self` **不是** ACL 豁免路径，它们的权限来自 Vault 内置的 `default` 策略。本 token 用 `no_default_policy` 关掉了 default，所以这两条必须显式授予。
 2. 创建一个绑定该策略的 **periodic**（`period=720h`）**orphan** token，并去掉默认策略；
 3. 打印 token 并写入 `backups/backup.token`（权限 `600`）。
 
@@ -488,19 +490,36 @@ chmod 700 cron-backup.sh
 
 - **`TTL is below half the period`** —— 说明 cron 里的续期一直在失败。去 `logs/backup.log` 里 grep `token renew-self failed` 确认。
 
-token 已过期 / 被吊销时返回 HTTP 403，退出码非 0；重新生成即可：`./setup-ha.sh gen-backup-token`。
+#### HTTP 403 怎么办
 
-> 该命令走 `auth/token/lookup-self`。这是 Vault 的内置豁免路径，任何有效 token 都能查询自己，因此最小权限的 `raft-snapshot` 策略无需增加任何规则。
+Vault 对「token 无效」和「token 有效但无权限」返回的都是 `permission denied`，所以 403 有两种可能：
+
+**a) token 已过期 / 被吊销** —— 重新生成：`./setup-ha.sh gen-backup-token`
+
+**b) token 的策略没有 `auth/token/lookup-self` 的 read 权限** —— 这条规则是后加的，早于它签发的备份 token 会命中此情况。典型特征是 **`backup` 能跑通，但 `token-status` 报 403**。
+
+情况 b 不需要重签 token，策略是**按名字在每次请求时解析**的，改策略即刻对已签发的 token 生效：
+
+```bash
+# 只重写 raft-snapshot 策略，不动现有 token（需 root token）
+./setup-ha.sh gen-backup-token --policy-only
+
+# 然后再查一次
+./setup-ha.sh token-status --backup-token
+```
+
+> `auth/token/lookup-self` 的 read 权限来自 Vault 内置的 `default` 策略（见 Vault 源码 `vault/policy_store.go` 的 `defaultPolicy`），它**不是** ACL 豁免路径。备份 token 用 `no_default_policy` 关掉了 default，所以必须在 `raft-snapshot` 策略里显式授予 —— 和 `renew-self` 同理。
 >
 > token 只从交互式输入、`VAULT_TOKEN` 环境变量或 `backups/backup.token` 读取，**不接受命令行参数** —— 否则 token 会出现在 `ps` 输出和 shell history 里。
 
-> 若环境已安装 vault CLI，也可等价手动创建（策略同上两条）：
+> 若环境已安装 vault CLI，也可等价手动创建（策略同上三条）：
 > ```bash
 > vault policy write raft-snapshot - <<'EOF'
 > path "sys/storage/raft/snapshot" { capabilities = ["read"] }
+> path "auth/token/lookup-self"    { capabilities = ["read"] }
 > path "auth/token/renew-self"     { capabilities = ["update"] }
 > EOF
-> vault token create -policy=raft-snapshot -period=720h -orphan
+> vault token create -policy=raft-snapshot -period=720h -orphan -no-default-policy
 > ```
 
 ---
