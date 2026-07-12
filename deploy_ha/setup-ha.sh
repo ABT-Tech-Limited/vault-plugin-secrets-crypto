@@ -327,8 +327,38 @@ cmd_vault_unseal() {
     return
   fi
 
-  # Shamir unseal
+  # Shamir unseal.
+  #
+  # Pre-flight: fail loudly if the local Vault API is unreachable, and refuse
+  # to prompt for keys while the node is uninitialized. A raft follower only
+  # becomes initialized once its retry_join to the leader succeeds; until then
+  # /sys/unseal rejects every key with HTTP 400.
+  local status_json
+  if ! status_json=$(curl_vault -S "${addr}/v1/sys/seal-status" 2>&1); then
+    error "Cannot reach Vault at ${addr}: ${status_json}"
+    error "Is the container running? Check:"
+    error "  docker compose -f docker-compose.ha.yml ps"
+    error "  docker compose -f docker-compose.ha.yml logs vault"
+    exit 1
+  fi
+
+  local initialized
+  initialized=$(echo "$status_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('initialized','unknown'))" 2>/dev/null || echo "unknown")
+  if [ "$initialized" = "False" ] || [ "$initialized" = "false" ]; then
+    error "This node is not initialized: it has not joined the Raft cluster yet."
+    error "A follower can only be unsealed AFTER retry_join to the leader succeeds."
+    error "Check leader reachability/TLS from this node, then the join attempts:"
+    error "  docker compose -f docker-compose.ha.yml logs vault | grep -iE 'join|raft'"
+    exit 1
+  fi
+
+  # Prefer Vault's own reported key threshold over the .env value.
   local threshold="${KEY_THRESHOLD:-3}"
+  local vault_t
+  vault_t=$(echo "$status_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('t',''))" 2>/dev/null || echo "")
+  if [[ "$vault_t" =~ ^[0-9]+$ ]] && [ "$vault_t" -ge 1 ]; then
+    threshold="$vault_t"
+  fi
   info "Shamir unseal: need ${threshold} key(s) to unseal"
 
   for i in $(seq 1 "$threshold"); do
@@ -340,12 +370,39 @@ cmd_vault_unseal() {
     fi
 
     echo -n "Enter unseal key ${i}/${threshold}: "
-    read -r -s unseal_key
+    if ! read -r -s unseal_key; then
+      echo ""
+      error "No key provided (stdin closed)."
+      exit 1
+    fi
     echo ""
 
-    curl_vault -X POST \
+    # Vault reports invalid keys, progress resets and not-initialized errors
+    # in the response body; surface them instead of discarding.
+    local resp
+    if ! resp=$(curl_vault -S -X POST \
       -d "{\"key\":\"${unseal_key}\"}" \
-      "${addr}/v1/sys/unseal" > /dev/null 2>&1
+      "${addr}/v1/sys/unseal" 2>&1); then
+      error "Failed to submit unseal key to ${addr}: ${resp}"
+      exit 1
+    fi
+
+    local api_err
+    api_err=$(echo "$resp" | python3 -c "import sys,json; print('; '.join(json.load(sys.stdin).get('errors') or []))" 2>/dev/null || echo "")
+    if [ -n "$api_err" ]; then
+      error "Vault rejected the unseal key: ${api_err}"
+      exit 1
+    fi
+
+    local resp_sealed
+    resp_sealed=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sealed','unknown'))" 2>/dev/null || echo "unknown")
+    if [ "$resp_sealed" = "False" ] || [ "$resp_sealed" = "false" ]; then
+      info "Key accepted. Threshold reached; unsealing..."
+    else
+      local progress
+      progress=$(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('progress','?'))+'/'+str(d.get('t','?')))" 2>/dev/null || echo "?/?")
+      info "Key accepted. Unseal progress: ${progress}"
+    fi
   done
 
   # Final check — on HA followers, unseal completes asynchronously: after the
