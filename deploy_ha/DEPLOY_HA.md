@@ -456,6 +456,11 @@ Root Token: hvs.xxxxxxxxxxxxx
 # 输出：backups/vault-backup-YYYYMMDD_HHMMSS.snap
 ```
 
+快照成功后该命令还会做两件事：
+
+1. 若 `.env` 开启了 `BACKUP_S3_ENABLED=true`，把快照上传到 S3（见 [备份到 S3（可选）](#备份到-s3可选)）；
+2. 清理本地超过 `BACKUP_LOCAL_RETENTION_DAYS`（默认 14 天）的旧快照，`backups/backup.token` 不受影响。
+
 ### 恢复（同一集群内回滚）
 
 恢复操作会影响 **整个集群**：
@@ -530,15 +535,60 @@ chmod 700 cron-backup.sh
 再配置 crontab —— **整条命令必须写在一行**，cron 不支持反斜杠续行：
 
 ```cron
-# 每天凌晨 2 点在 leader 上执行
-0 2 * * * /path/to/deploy_ha/cron-backup.sh >> /path/to/deploy_ha/logs/backup.log 2>&1
+# 每小时整点在 leader 上执行
+0 * * * * /path/to/deploy_ha/cron-backup.sh >> /path/to/deploy_ha/logs/backup.log 2>&1
 ```
+
+每小时一次快照不会撑爆磁盘：每次备份成功后自动删除本地 14 天前的旧快照（`.env` 中 `BACKUP_LOCAL_RETENTION_DAYS` 可调，设 `0` 关闭清理）。
 
 > ⚠️ cron 的每一行都是一条独立任务，行尾的 `\` **不会**续接下一行；换行后的内容会被当成新任务的分钟字段，报 `bad minute`。
 >
 > ⚠️ crontab 中的 `%` 是特殊字符（会被转成换行），命令里若需要 `%`（如 `date +%F`）必须写成 `\%`。把命令放进脚本可一并规避这两个坑。
 
 > `TLS_DISABLE=true` 时把脚本里的 `https://` 改为 `http://` 并去掉 `--cacert tls/ca.pem`。
+
+### 备份到 S3（可选）
+
+开启后，`backup` 命令在本地快照成功后调用 aws CLI 把快照推送到 S3，按日期分目录存放：
+
+```
+s3://<bucket>/[prefix/]YYYY/MM/DD/vault-backup-YYYYMMDD_HHMMSS.snap
+# 例如 s3://my-vault-backups/vault-ha/2026/07/13/vault-backup-20260713_140000.snap
+```
+
+在 `.env` 中配置：
+
+```bash
+BACKUP_S3_ENABLED=true
+BACKUP_S3_BUCKET=my-vault-backups
+# 可选：对象 key 前缀、bucket 所在区域
+# BACKUP_S3_PREFIX=vault-ha
+# BACKUP_S3_REGION=us-east-1
+```
+
+前提条件：
+
+- 节点上已安装 aws CLI（`aws --version` 能运行即可，v1/v2 均支持）；
+- 凭证走 AWS 标准链，按顺序：`.env` 中的 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（若为 KMS 解封配置过会被一并复用）→ `~/.aws/credentials` → EC2 实例角色（**推荐**，免密钥落盘）。所用身份只需对 bucket 有 `s3:PutObject`：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "s3:PutObject",
+    "Resource": "arn:aws:s3:::my-vault-backups/*"
+  }]
+}
+```
+
+行为约定：
+
+- 上传失败**不影响本地快照**（文件保留），命令以非零退出并在 `logs/backup.log` 留下 `[ERROR]`，便于监控发现；
+- 上传失败时本地清理照常执行，避免 S3 配置坏掉后磁盘被每小时的快照塞满；
+- **S3 上的快照永不被脚本删除**。如需过期归档/清理，用 S3 生命周期规则（Lifecycle）自行配置，例如 90 天后转 Glacier。
+
+> Raft 快照包含 Vault 全部加密数据（由 barrier key 加密，S3 上无法解密），但泄露仍有风险。bucket 应开启 **阻止公共访问 + 默认加密（SSE-S3/SSE-KMS）**，并限制读取权限。
 
 ### 查看 token 有效期
 
@@ -778,8 +828,8 @@ set of unseal keys; use the snapshot-force API to bypass this check
 - [ ] 防火墙仅开放 8200/8201 给必要来源
 - [ ] 服务器间使用内网通信
 - [ ] 定期轮换 TLS 证书
-- [ ] 每日自动备份（Raft 快照）
-- [ ] 快照推送到异地存储（S3），**不与 Vault 节点同生共死**
+- [ ] 每小时自动备份（Raft 快照）
+- [ ] 快照推送到异地存储（S3），**不与 Vault 节点同生共死**（开启 `BACKUP_S3_ENABLED`，见 [备份到 S3](#备份到-s3可选)）
 - [ ] Unseal keys 离线保管，**与快照分开存放**（两者都丢 = 数据永久损毁）
 - [ ] 定期演练 [灾难恢复](#灾难恢复) 全流程（含 `restore-force` + 旧 key 解封）
 - [ ] 监控集群健康状态（Prometheus + `/v1/sys/health`）

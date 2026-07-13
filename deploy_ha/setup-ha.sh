@@ -17,7 +17,7 @@
 #   raft-status     Show Raft cluster member list
 #   gen-backup-token Create a least-privilege backup token (run on leader)
 #   token-status    Show a token's TTL, policies and renewal health
-#   backup          Create a Raft snapshot backup (online, no downtime)
+#   backup          Create a Raft snapshot backup (optional S3 upload, local retention)
 #   restore         Restore a snapshot into this cluster (seal check enforced)
 #   restore-force   Restore a snapshot into a fresh cluster (disaster recovery)
 #   list-keys       List crypto plugin keys
@@ -845,6 +845,66 @@ if warnings:
   echo ""
 }
 
+# Upload a snapshot to S3 under a date-based key: [prefix/]YYYY/MM/DD/<file>.
+# Credentials come from the standard AWS CLI chain (env vars sourced from
+# .env, ~/.aws, or an EC2 instance role). Never touches the local file.
+_upload_backup_s3() {
+  local backup_file="$1"
+  local timestamp="$2"
+
+  if ! command -v aws >/dev/null 2>&1; then
+    error "BACKUP_S3_ENABLED=true but the aws CLI is not installed."
+    error "Install awscli on this node or set BACKUP_S3_ENABLED=false in .env"
+    return 1
+  fi
+  if [ -z "${BACKUP_S3_BUCKET:-}" ]; then
+    error "BACKUP_S3_ENABLED=true but BACKUP_S3_BUCKET is not set in .env"
+    return 1
+  fi
+
+  # Date path comes from the snapshot's own timestamp (YYYYMMDD_HHMMSS) so
+  # the S3 path always matches the file name, even across midnight.
+  local date_path="${timestamp:0:4}/${timestamp:4:2}/${timestamp:6:2}"
+  local prefix="${BACKUP_S3_PREFIX:-}"
+  prefix="${prefix%/}"
+  local s3_uri="s3://${BACKUP_S3_BUCKET}/${prefix:+${prefix}/}${date_path}/$(basename "$backup_file")"
+
+  local aws_args=()
+  [ -n "${BACKUP_S3_REGION:-}" ] && aws_args+=(--region "${BACKUP_S3_REGION}")
+
+  info "Uploading snapshot to ${s3_uri} ..."
+  if aws s3 cp --only-show-errors "${aws_args[@]}" "$backup_file" "$s3_uri"; then
+    ok "Snapshot uploaded: ${s3_uri}"
+  else
+    error "S3 upload failed. Local snapshot is kept: ${backup_file}"
+    error "Check AWS credentials and s3:PutObject permission on ${BACKUP_S3_BUCKET}."
+    return 1
+  fi
+}
+
+# Delete local snapshots older than BACKUP_LOCAL_RETENTION_DAYS (default 14,
+# 0 disables). Matches only vault-backup-*.snap, so backups/backup.token is
+# never touched. S3 copies are kept forever (use bucket lifecycle rules).
+_prune_local_backups() {
+  local backup_dir="$1"
+  local days="${BACKUP_LOCAL_RETENTION_DAYS:-14}"
+
+  case "$days" in
+    *[!0-9]*)
+      warn "Invalid BACKUP_LOCAL_RETENTION_DAYS='${days}', skipping local cleanup"
+      return 0
+      ;;
+    0) return 0 ;;
+  esac
+
+  local deleted
+  deleted=$(find "$backup_dir" -maxdepth 1 -type f -name 'vault-backup-*.snap' \
+    -mmin "+$((days * 1440))" -print -delete | wc -l | tr -d ' ')
+  if [ "$deleted" -gt 0 ]; then
+    info "Local retention: deleted ${deleted} snapshot(s) older than ${days} days"
+  fi
+}
+
 cmd_backup() {
   local addr
   addr="$(vault_addr)"
@@ -890,6 +950,17 @@ cmd_backup() {
     error "Required policy: path \"sys/storage/raft/snapshot\" { capabilities = [\"read\"] }"
     exit 1
   fi
+
+  # An S3 failure must not skip local retention — a broken upload config
+  # running hourly would otherwise fill the disk. Prune before exiting non-zero.
+  local upload_failed=false
+  if [ "${BACKUP_S3_ENABLED:-false}" = "true" ]; then
+    _upload_backup_s3 "$backup_file" "$timestamp" || upload_failed=true
+  fi
+
+  _prune_local_backups "$backup_dir"
+
+  [ "$upload_failed" = "false" ] || exit 1
 }
 
 # Shared implementation for `restore` and `restore-force`.
@@ -1176,6 +1247,8 @@ cmd_help() {
   echo "                   (--policy-only rewrites the policy, keeps the existing token)"
   echo "  token-status     Show a token's TTL and policies (add --backup-token to read backups/backup.token)"
   echo "  backup           Create a Raft snapshot backup (online, no downtime)"
+  echo "                   (BACKUP_S3_ENABLED=true also uploads to S3; local copies"
+  echo "                    older than BACKUP_LOCAL_RETENTION_DAYS days are pruned)"
   echo "  restore          Restore a snapshot into THIS cluster (seal check enforced)"
   echo "  list-keys        List crypto plugin keys (verifies the plugin mount)"
   echo "  key-info         Show one key by external_id (verifies key material decrypts)"
