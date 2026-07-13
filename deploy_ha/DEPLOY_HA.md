@@ -131,7 +131,7 @@ deploy_ha/
 
 ## AWS 单 AZ 部署
 
-本章描述在 AWS 上手动准备 3 台 EC2 的基础设施；准备好后再回到 [部署流程](#部署流程) 用 `setup-ha.sh` 部署。地址方案采用**私网 IP 直连**，客户端直连节点（不使用负载均衡器）。
+本章描述在 AWS 上手动准备 3 台 EC2 的基础设施；准备好后再回到 [部署流程](#部署流程) 用 `setup-ha.sh` 部署。节点间地址方案采用**私网 IP 直连**；客户端接入可选**直连 3 节点**或**内网 NLB 统一入口**，见下文 §5。
 
 ### 1. 网络与实例
 
@@ -163,7 +163,7 @@ deploy_ha/
 
 | 方向 | 端口 | 协议 | 来源 / 目标 | 用途 |
 |------|------|------|-------------|------|
-| 入站 | 8200 | TCP | 客户端 / 应用 SG | Vault API |
+| 入站 | 8200 | TCP | 客户端 / 应用 SG；走 NLB 时另加 NLB 的 SG | Vault API（含 NLB 健康检查） |
 | 入站 | 8201 | TCP | `sg-vault` 自身 | Raft 集群通信（仅节点间） |
 | 入站 | 22 | TCP | 堡垒机 SG（或不开，用 SSM） | 运维登录 |
 | 出站 | 443 | TCP | 0.0.0.0/0 | 拉镜像等（按需收紧） |
@@ -179,6 +179,7 @@ deploy_ha/
 ```bash
 VAULT_FQDN=10.0.1.10           # 本节点私网 IP
 VAULT_SAN_IP=10.0.1.10         # 写入证书 SAN 的 IP（必填）
+# VAULT_SAN_DNS=vault.internal # 走 NLB 时必填：LB 的固定域名，所有节点相同（见 §5 方案 B）
 
 VAULT_NODE_1_ADDR=https://10.0.1.10:8200
 VAULT_NODE_2_ADDR=https://10.0.1.11:8200
@@ -189,14 +190,76 @@ VAULT_NODE_3_ADDR=https://10.0.1.12:8200
 
 > 也可改用 Route53 私有托管区给每台分配 DNS 名（如 `vault-1.internal`）；用 DNS 名则无需 IP SAN、`VAULT_SAN_IP` 可留空。本指南按私网 IP 走。
 
-### 5. 客户端访问（直连，无负载均衡）
+### 5. 客户端访问（直连或 NLB）
 
-客户端（你的应用）**直连节点**，不经 LB：
+两种接入方式二选一。它们依赖同一个机制：**standby 节点默认把请求经 8201 自动转发给 leader**，所以命中任意一个健康且已解封的节点都能正常读写，客户端 / LB 无需感知谁是 leader。
+
+#### 方案 A：直连 3 节点（无 LB，零额外成本）
 
 - 客户端配置**全部 3 个节点地址** `https://<私网IP>:8200`，并信任集群 CA（`ca.pem`）
-- Vault standby 节点默认会把请求**转发给 leader**，所以命中任意一个**健康且已解封**的节点都能正常读写
 - **没有 LB，客户端需自己做失败重试**：某节点 sealed（HTTP 503）或不可达时，换下一个地址重试
 - 节点证书 SAN 已含私网 IP，客户端 HTTPS 直接校验通过
+
+#### 方案 B：内网 NLB 统一入口
+
+```
+clients ──▶ NLB（TCP :8200 直通，不解密）──▶ vault-1 / vault-2 / vault-3
+```
+
+客户端只配一个地址，sealed / 宕机节点由健康检查自动摘除，无需在客户端写重试逻辑。多客户端接入时推荐。
+
+**NLB 与 target group 配置：**
+
+| 项 | 配置 |
+|----|------|
+| 负载均衡器 | Network Load Balancer，**internal**（内网型），创建时挂好安全组（事后不能补挂） |
+| 监听器 | TCP :8200 → target group（**TLS 直通**，LB 不解密，端到端 TLS 与 CA 均不变） |
+| Target group | 协议 TCP，端口 8200，target type `instance`，注册 3 台 EC2 |
+| 健康检查协议 | HTTPS（LB 健康检查**不校验证书**，自签 CA 无碍） |
+| 健康检查端口 | traffic-port（8200） |
+| 健康检查路径 | `/v1/sys/health?standbyok=true` |
+| 间隔 / 阈值 | 10 秒，健康 / 不健康阈值各 2 次 |
+
+健康检查按 `/v1/sys/health` 的返回码判定（NLB 默认 200–399 视为健康）：
+
+| 返回码 | 节点状态 | 判定 |
+|--------|---------|------|
+| 200 | leader；带 `standbyok=true` 时 standby 也返回 200 | ✅ 留在池内 |
+| 429 | standby（不带 `standbyok`） | ❌ 摘除 |
+| 501 | 未初始化 | ❌ 摘除 |
+| 503 | sealed | ❌ 摘除 |
+
+路径带不带 `standbyok=true` 是两种策略：
+
+- **带（推荐）**：3 个已解封节点全部接流量，standby 收到请求自动转发给 leader（多一跳内网转发，延迟可忽略），leader 切换对客户端完全透明
+- **不带**：只有 leader 留在池内，省一跳转发；代价是 leader 切换后要等健康检查翻转（约 间隔 × 阈值 ≈ 20 秒）入口才恢复
+
+**证书 SAN（必须改）**：客户端经 LB 域名访问，TLS 校验的是该域名，所以**每台节点**的证书 SAN 都必须包含它。建议在 Route53 私有托管区给 NLB 配固定别名（如 `vault.internal`），证书写这个名字，将来换 LB 不用重签。生成证书前在**所有节点**的 `.env` 设置：
+
+```bash
+VAULT_SAN_DNS=vault.internal   # 多个域名用逗号分隔（不要空格，或整体加引号）
+```
+
+`gen-cert` 会把 `DNS:vault.internal` 一并写入 SAN。客户端照常信任 `ca.pem`，地址换成 `https://vault.internal:8200`。
+
+已运行的集群补加 NLB：重签证书后用 SIGHUP 热重载（Vault 会重新加载 listener 的 TLS 证书，**不会 seal**，无需重新解封）：
+
+```bash
+# 每台节点执行：
+vim .env                        # 加 VAULT_SAN_DNS=...
+rm tls/cert.pem tls/key.pem
+./setup-ha.sh gen-cert
+docker compose -f docker-compose.ha.yml --env-file .env kill -s HUP vault
+```
+
+**保持直连、不进 LB 的部分：**
+
+- 8201（Raft 集群通信）：节点间直连，LB 只挂 8200
+- `retry_join` / `api_addr` / `cluster_addr`：继续用各节点私网 IP，**不要指向 LB**
+- 运维操作（`vault-init` / `vault-unseal` / `raft-status` / 备份 cron）：仍在各节点本机执行
+- 安全组：8200 入站在客户端来源之外**另加 NLB 的安全组**（健康检查的来源；若 NLB 未挂 SG 则放行其子网网段）。NLB `instance` target 默认保留客户端源 IP，审计日志仍是真实来源，客户端来源规则保持不变
+
+> NLB 不改变解封运维：Shamir 模式下节点重启后仍需人工 `vault-unseal`，LB 只是让 sealed 期间的流量自动绕开该节点。
 
 ### 6. 架构（单 AZ）
 
@@ -214,6 +277,8 @@ VAULT_NODE_3_ADDR=https://10.0.1.12:8200
            └────────────────────────────────────────────────┘
   ⚠ 单 AZ：扛单实例故障，不扛整个 AZ 故障
 ```
+
+> 采用 NLB（§5 方案 B）时，clients → 内网 NLB → 3 节点，图中其余部分不变。
 
 ### 7. Shamir 解封在 AWS 上的注意事项
 
@@ -261,6 +326,9 @@ vim .env
 VAULT_NODE_1_ADDR=https://10.0.1.10:8200
 VAULT_NODE_2_ADDR=https://10.0.1.11:8200
 VAULT_NODE_3_ADDR=https://10.0.1.12:8200
+
+# 走 NLB 方案时再加（所有节点相同，见「AWS 单 AZ 部署」§5 方案 B）
+# VAULT_SAN_DNS=vault.internal
 ```
 
 ```bash

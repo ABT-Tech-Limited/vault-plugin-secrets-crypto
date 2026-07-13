@@ -150,6 +150,19 @@ cmd_gen_cert() {
     san="${san},IP:${VAULT_SAN_IP}"
   fi
 
+  # VAULT_SAN_DNS adds extra DNS SAN entries (comma-separated) — required when
+  # clients reach the cluster through a load balancer (e.g. AWS NLB): TLS is
+  # verified against the LB / Route53 hostname, so every node's certificate
+  # must carry it. Same value on all nodes.
+  if [ -n "${VAULT_SAN_DNS:-}" ]; then
+    local dns_names dns
+    IFS=',' read -ra dns_names <<< "${VAULT_SAN_DNS}"
+    for dns in "${dns_names[@]}"; do
+      dns="${dns// /}"
+      [ -n "$dns" ] && san="${san},DNS:${dns}"
+    done
+  fi
+
   # Create SAN config
   cat > tls/_openssl.cnf <<EOF
 [req]
