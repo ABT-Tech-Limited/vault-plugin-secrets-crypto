@@ -188,6 +188,25 @@ EOF
   ok "Node certificate generated:"
   info "  Cert: tls/cert.pem (SAN: ${san})"
   info "  Key:  tls/key.pem"
+
+  # If this node's container is already running, the start-time
+  # `chown -R vault:vault /vault/tls` has already happened: the files just
+  # written are owned by the invoking user (often root) with mode 600, which
+  # the in-container vault user cannot read. A SIGHUP reload would then fail
+  # and keep serving the old certificate, so hand ownership back now.
+  local container="${VAULT_CONTAINER_NAME:-vault-ha-1}"
+  if command -v docker >/dev/null 2>&1 \
+    && [ "$(docker container inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" = "true" ]; then
+    if docker exec "$container" chown vault:vault /vault/tls/cert.pem /vault/tls/key.pem 2>/dev/null; then
+      ok "Cert ownership fixed inside running container '${container}'."
+      info "Apply the new cert without sealing (hot TLS reload):"
+      info "  docker compose -f docker-compose.ha.yml --env-file .env kill -s HUP vault"
+    else
+      warn "Container '${container}' is running but chown inside it failed."
+      warn "Run manually before reloading:"
+      warn "  docker exec ${container} chown vault:vault /vault/tls/cert.pem /vault/tls/key.pem"
+    fi
+  fi
 }
 
 cmd_prepare_config() {

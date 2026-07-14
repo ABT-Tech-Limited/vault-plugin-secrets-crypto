@@ -248,9 +248,23 @@ VAULT_SAN_DNS=vault.internal   # 多个域名用逗号分隔（不要空格，�
 # 每台节点执行：
 vim .env                        # 加 VAULT_SAN_DNS=...
 rm tls/cert.pem tls/key.pem
-./setup-ha.sh gen-cert
+./setup-ha.sh gen-cert          # 检测到本节点容器在运行时，会自动修正新证书属主
+
 docker compose -f docker-compose.ha.yml --env-file .env kill -s HUP vault
+
+# 验证已生效：输出应包含 VAULT_SAN_DNS 里的域名
+echo | openssl s_client -connect 127.0.0.1:8200 2>/dev/null \
+  | openssl x509 -noout -ext subjectAltName
 ```
+
+> **属主背景**：容器启动时的 `chown -R vault:vault /vault/tls` 只执行一次；运行中重签的文件属主是执行 `gen-cert` 的用户（通常 root）且权限 600，容器内 vault 进程读不了 → SIGHUP 重载失败、**静默保留旧证书**。`gen-cert` 会在检测到容器运行时自动 `docker exec` 修正属主；若它提示 chown 失败，先手动执行再重载：
+>
+> ```bash
+> docker compose -f docker-compose.ha.yml --env-file .env exec vault \
+>   chown vault:vault /vault/tls/cert.pem /vault/tls/key.pem
+> ```
+>
+> 若 SAN 仍是旧的，用 `docker logs <容器名> 2>&1 | grep -iE "reload|permission"` 查看重载报错。
 
 **保持直连、不进 LB 的部分：**
 
