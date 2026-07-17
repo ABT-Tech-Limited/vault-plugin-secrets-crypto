@@ -1,10 +1,11 @@
-# Vault 加密钱包插件 - HA 集群部署指南（AWS 单 AZ · 3 节点 · Shamir）
+# Vault 加密钱包插件 - HA 集群部署指南（AWS 单 AZ · 3 节点 · Shamir / AWS KMS 解封）
 
 ## 目录
 
 - [前置条件](#前置条件)
 - [架构概述](#架构概述)
 - [节点数怎么选](#节点数怎么选)
+- [解封方式怎么选：Shamir vs AWS KMS](#解封方式怎么选shamir-vs-aws-kms)
 - [AWS 单 AZ 部署](#aws-单-az-部署)
 - [目录结构](#目录结构)
 - [部署流程](#部署流程)
@@ -98,6 +99,27 @@ Vault 整合存储用 Raft 共识，可用的**投票节点必须超过半数**�
 - ❌ **扛不住**：整个 AZ 故障（断电 / 网络隔离）—— 3 台一起失联
 
 > **想抵御 AZ 级故障？** 把 3 台分到 3 个不同 AZ 即可，本套工具链与配置无需改动，只是把实例放到不同子网。代价是跨 AZ 复制有少量延迟与数据传输费。
+
+---
+
+## 解封方式怎么选：Shamir vs AWS KMS
+
+`.env` 中的 `UNSEAL_METHOD` 决定 Vault 的 seal 方式，两种都被本套工具链完整支持。它影响的不只是「重启要不要输 key」，而是**信任根**在哪里——这直接决定初始化产物、日常运维和灾难恢复的走法。本文档在每个有差异的环节都会分模式标注。
+
+| | `shamir`（默认） | `awskms` |
+|---|---|---|
+| 解封方式 | 人工输入 3/5 个 unseal key | 节点启动时经 AWS KMS 自动解封 |
+| `vault-init` 产物 | **unseal keys** + root token | **recovery keys** + root token（节点 init 完即已解封） |
+| 节点重启 / 加入 | 每次都需人工解封 | 全自动，无人工介入 |
+| 信任根 | unseal keys（由管理员持有） | 那把 **KMS key**（+ 对它的 IAM 权限） |
+| 灾难恢复 | `restore-force` + 用**旧 unseal keys** 人工解封 | 新集群配**同一把 KMS key**，恢复后自动解封（详见 [灾难恢复](#灾难恢复)） |
+| 致命丢失点 | unseal keys 丢失 → 快照永久无法解密 | KMS key 被删 → 快照永久无法解密 |
+| 额外依赖 | 无 | 节点解封时 KMS 必须可达；key 永不能删（见 [§8](#8-aws-kms-自动解封的注意事项)） |
+| `.env` 配置 | `UNSEAL_METHOD=shamir` | `UNSEAL_METHOD=awskms` + `AWS_REGION` / `AWS_KMS_KEY_ID`（凭证推荐 EC2 实例角色） |
+
+**怎么选**：接受「每次重启有人到场输 key」的运维成本、不想引入对 AWS KMS 的依赖 → Shamir；希望重启 / 换实例免人工、能接受把信任根托付给一把 KMS key 并为它做好防删除保护 → awskms。
+
+> 已用 Shamir 初始化的集群想切到 awskms，属于 **seal 迁移**：在配置中加入 `seal "awskms"` 段后，需用旧 unseal keys 走一次 migrate 解封（`/sys/unseal` 带 `"migrate": true`），不是改配置重启即可，切换前请查阅 Vault 官方 seal migration 文档。
 
 ---
 
@@ -306,7 +328,21 @@ echo | openssl s_client -connect 127.0.0.1:8200 2>/dev/null \
     s3://your-bucket/vault-snapshots/ --sse aws:kms
   ```
   给该 S3 前缀配生命周期策略做保留 / 过期。
-- **将来想免人工解封**：可切换到 AWS KMS 自动解封（已有模板 `vault-awskms-ha.hcl`），重启 / 扩缩容无需手动输 key。注意自动解封下 `init` 拿到的是 **recovery key** 而非 unseal key。
+- **将来想免人工解封**：可切换到 AWS KMS 自动解封，见下节 [§8](#8-aws-kms-自动解封的注意事项)。已初始化的集群切换属于 seal 迁移，需用旧 unseal keys 走一次 migrate 解封（见 [解封方式怎么选](#解封方式怎么选shamir-vs-aws-kms) 末尾说明）。
+
+### 8. AWS KMS 自动解封的注意事项
+
+选择 `UNSEAL_METHOD=awskms`（模板 `vault-awskms-ha.hcl`）后，节点启动 / 加入集群时自动经 KMS 解封，重启和换实例都无需人工输 key。代价是信任根从「人持有的 unseal keys」变成「一把 AWS KMS key」，运维重点随之变化：
+
+- **KMS key 是唯一信任根，必须防删除**。集群数据和**所有历史快照**永远只能被这把 key 解密；key 被删（KMS 计划删除有 7–30 天等待期）→ 集群与全部备份一起永久变砖，无任何补救。建议：
+  - key 策略 / IAM / SCP 显式拒绝 `kms:ScheduleKeyDeletion` 与 `kms:DisableKey`（保留给极少数 break-glass 身份）
+  - EventBridge + CloudTrail 对这两个 API 调用配置告警，在 7–30 天等待期内还来得及取消删除
+- **IAM 权限**：节点身份需要对该 key 的 `kms:Encrypt`、`kms:Decrypt`、`kms:DescribeKey`。推荐 EC2 实例角色，避免把静态 AK/SK 写进 `.env` 落盘
+- **region 绑定**：KMS 密文只能在 key 所在 region 解密。若灾难恢复目标包含「换 region 重建」，必须从一开始就用 **multi-Region key**（key id 以 `mrk-` 开头）并在备用 region 创建副本；单区域 key 事后无法补救
+- **KMS 可达性**：运行中的节点不依赖 KMS，但**节点重启 / 新节点加入时** KMS 不可达就无法解封。给 VPC 配 KMS 的 **interface endpoint**，避免解封路径依赖 NAT / 公网出口
+- **init 产物是 recovery keys**：不用于解封（KMS 负责），但它是 root token 丢失后唯一的补救手段（generate-root 流程），仍需像 Shamir unseal keys 一样离线分发给不同管理员保管
+- **不能借恢复换 key**：快照只认加密它的那把 key。想换 KMS key，必须在集群**存活时**做 seal 迁移，之后的新快照才绑定新 key
+- **仍按固定实例部署**：自动解封只解决「重启后 sealed」这一件事；Raft 成员、证书、数据卷仍是手工管理，本工具链不支持 Auto Scaling Group 自动扩缩
 
 ## 部署流程
 
@@ -399,7 +435,8 @@ scp tls/ca.pem tls/ca-key.pem user@vault-3.example.com:deploy_ha/tls/
 ./setup-ha.sh vault-init
 ```
 
-输出示例：
+**Shamir 模式**输出示例：
+
 ```
 [OK] Vault cluster initialized! Keys saved to vault-init-keys.json
 ===========================================================
@@ -413,9 +450,15 @@ Root Token: hvs.xxxxxxxxxxxxx
 
 **重要**：安全保管 unseal keys 和 root token。
 
+**awskms 模式**的差异：auto-unseal 下 `/sys/init` 不接受 `secret_shares`/`secret_threshold`，脚本会自动改传 `recovery_shares`/`recovery_threshold`（数值仍取 `.env` 的 `KEY_SHARES`/`KEY_THRESHOLD`）。此时：
+
+- `vault-init-keys.json` 里保存的是 **recovery keys**（JSON 字段为 `recovery_keys`，`keys` 为空）+ root token
+- 节点在初始化完成的瞬间**已自动解封**，无需任何解封操作
+- recovery keys 不用于解封，但它是 root token 丢失后唯一的补救手段，同样要离线分发给不同管理员保管
+
 ### 第六步：解封（所有节点）
 
-> 本指南采用 **Shamir 手动解封**。若改用 AWS KMS 自动解封（`vault-awskms-ha.hcl`），节点启动会自动解封，`init` 得到的是 recovery key 而非 unseal key，本步骤可跳过。
+> **awskms 模式跳过本步骤**：节点启动 / 加入集群时自动经 KMS 解封，直接用 `./setup-ha.sh status` 确认每台 `Sealed: false` 即可（该模式下 `vault-unseal` 也只做状态检查，不会提示输 key）。以下为 Shamir 模式操作。
 
 在 **每台节点** 上执行（使用相同的 unseal keys）：
 
@@ -483,11 +526,11 @@ Root Token: hvs.xxxxxxxxxxxxx
 ./setup-ha.sh restore backups/vault-backup-20250215_120000.snap
 ```
 
-恢复后所有节点可能需要重新解封（Shamir 模式）。
+恢复后：**Shamir 模式**下所有节点可能需要重新解封；**awskms 模式**下节点自动经 KMS 解封，无需操作（用 `./setup-ha.sh status` 确认即可）。
 
-> `restore` 会让 Vault 校验快照的 seal 一致性，**拒绝**来自其他集群的快照。这层保护是有意保留的，防止误把 A 集群的快照灌进 B 集群。
+> `restore` 会让 Vault 校验快照的 seal 一致性，**拒绝**当前 seal 解不开的快照。这层保护是有意保留的，防止误把 A 集群的快照灌进 B 集群。
 >
-> 集群整体损毁、要在全新服务器上重建时，这个校验必然失败（新集群的 Shamir key 不可能和快照匹配）。那种情况见 [灾难恢复](#灾难恢复)。
+> 集群整体损毁、要在全新服务器上重建时：Shamir 模式下这个校验必然失败（新集群的 unseal keys 不可能和快照匹配），必须走 `restore-force`；awskms 模式下只要新集群配的是**同一把 KMS key**，校验通常能直接通过。两种情况都见 [灾难恢复](#灾难恢复)。
 
 ### 验证恢复结果
 
@@ -685,7 +728,7 @@ Vault 对「token 无效」和「token 有效但无权限」返回的都是 `per
 # 在目标节点上
 ./setup-ha.sh stop
 ./setup-ha.sh start
-./setup-ha.sh vault-unseal  # Shamir 模式需要重新解封
+./setup-ha.sh vault-unseal  # Shamir 模式需要重新解封；awskms 自动解封（此命令只查状态）
 ```
 
 如果重启的是 Leader，集群会自动选举新 Leader。
@@ -694,7 +737,7 @@ Vault 对「token 无效」和「token 有效但无权限」返回的都是 `per
 
 1. 在新服务器上部署 `deploy_ha/` 并配置 `.env`（使用新的 VAULT_NODE_ID）
 2. 复制 CA 证书，生成新节点证书
-3. `prepare-config` → `start` → `vault-unseal`
+3. `prepare-config` → `start` → `vault-unseal`（awskms 模式免解封，加入后自动完成）
 4. 新节点通过 `retry_join` 自动加入集群
 5. （可选）从 Raft 中移除旧节点：
    ```bash
@@ -724,33 +767,45 @@ docker compose -f docker-compose.ha.yml logs -f
 
 **最低存活节点数：2（3 节点集群）**
 
+> 表中的「解封」环节仅 Shamir 模式需要人工执行；awskms 模式下节点重启后自动经 KMS 解封，恢复方式简化为「重启节点」。
+
 ---
 
 ## 灾难恢复
 
 三台服务器全部永久损毁（实例被销毁、EBS 卷丢失、整个 AZ 不可恢复）时，在全新服务器上重建集群的流程。
 
+两种解封方式的**信任根不同，恢复的前提和步骤也不同**：Shamir 靠人持有的旧 unseal keys，awskms 靠那把还活着的 KMS key。先对照先决条件，再按你的模式走对应流程；「两个容易踩的点」和「演练」对两种模式都适用。
+
 ### 先决条件：缺一不可
 
-Shamir 模式下，快照里的数据是用**旧集群的 master key** 加密的。恢复的前提是你同时持有以下三样：
+快照里的数据是用**旧集群的 master key** 加密的，而 master key 由 seal 保护——seal 的信任根在谁手里，恢复就取决于谁。前提是你同时持有以下三样：
 
-| # | 东西 | 存放位置 | 丢失后果 |
-|---|------|---------|---------|
-| 1 | **快照文件** `.snap` | **必须在三台机器之外**（如 S3） | 数据全部丢失 |
-| 2 | **旧集群的 unseal keys** | `vault-init-keys.json`，分发给不同管理员 | 快照是无法解密的砖，**无任何补救手段** |
-| 3 | **旧集群的 root token** | 同上 | 需要另有高权限 token |
+| # | 需要什么 | Shamir 模式 | awskms 模式 |
+|---|---------|------------|-------------|
+| 1 | **快照文件** `.snap` | **必须在三台机器之外**（如 S3）；丢失 = 数据全部丢失 | 同左 |
+| 2 | **能解开快照的 seal** | 旧集群的 **unseal keys**（`vault-init-keys.json`，分发给不同管理员） | 加密快照的那把 **KMS key 仍存在且启用**，且新机器的 IAM 身份对它有 `kms:Encrypt/Decrypt/DescribeKey` |
+| 3 | **恢复后的管理权限** | 旧集群的 **root token** | 旧集群的 **root token**；若丢失，可用旧集群的 **recovery keys** 走 generate-root 重新生成 |
 
-第 2 条是**硬约束**。Vault 源码 `vault/raft.go` 的 `raftSnapshotRestoreCallback` 里，恢复后若 keyring 解不开：
+第 2 条是**硬约束**，丢了快照就是无法解密的砖，**无任何补救手段**。Vault 源码 `vault/raft.go` 的 `raftSnapshotRestoreCallback` 对两种 seal 的分野：
 
 ```go
+switch c.seal.BarrierSealConfigType() {
 case SealConfigTypeShamir:
     // If we are a shamir seal we can't do anything. Just
     // seal all nodes.
+default:
+    // If we are using an auto-unseal we can try to use the seal to
+    // unseal again. If the auto-unseal mechanism has changed then
+    // there isn't anything we can do but seal.
 ```
 
-> 所以「把 unseal keys 和快照存在同一批服务器上」等于没有备份。快照推 S3（见 [Shamir 解封在 AWS 上的注意事项](#7-shamir-解封在-aws-上的注意事项)），unseal keys 离线分发给不同管理员。
+- **Shamir**：恢复后节点全部 seal，等人拿**旧 unseal keys** 来解封；
+- **awskms**：Vault 用当前 seal（KMS key）解出快照里的 root key 并**自动完成解封**——前提是配置的是**同一把 key**；key 换了就落进 "there isn't anything we can do but seal"。
 
-### 恢复流程
+> 所以，Shamir 下「把 unseal keys 和快照存在同一批服务器上」、awskms 下「把 KMS key 删掉」，都等于没有备份。快照推 S3（见 [备份到 S3（可选）](#备份到-s3可选)）；unseal keys / recovery keys 离线分发给不同管理员；KMS key 按 [§8](#8-aws-kms-自动解封的注意事项) 做删除防护。
+
+### 恢复流程（Shamir 模式）
 
 #### 第一步：拉起一个全新的、临时的集群
 
@@ -817,7 +872,82 @@ set of unseal keys; use the snapshot-force API to bypass this check
 - 备份 token 也在快照里恢复了，但 `backups/backup.token` 文件不在。要么从旧机器的备份里取回该文件，要么重新签发：`./setup-ha.sh gen-backup-token`
 - 客户端换用新集群的 `ca.pem`，并把地址指向新的私网 IP
 
-### 两个容易踩的点
+### 恢复流程（awskms 模式）
+
+整体骨架与 Shamir 相同（临时集群 → 灌快照 → 验证），差异集中在三处：`.env` 必须配**旧集群同一把 KMS key**；恢复优先用普通 `restore` 而不是 `restore-force`；恢复后**没有人工解封环节**，等自动解封即可。
+
+#### 第一步：拉起一个全新的、临时的集群
+
+按 [部署流程](#部署流程) 走，`.env` 的关键在 KMS 三项：
+
+```bash
+UNSEAL_METHOD=awskms
+AWS_REGION=<与旧集群相同>
+AWS_KMS_KEY_ID=<旧集群同一把 key —— 整个恢复的前提>
+```
+
+```bash
+./setup-ha.sh init-dirs
+# 节点 1：./setup-ha.sh gen-ca ，然后把 ca.pem / ca-key.pem 分发到节点 2、3
+./setup-ha.sh gen-cert
+./setup-ha.sh prepare-config
+./setup-ha.sh start
+
+# 节点 1
+./setup-ha.sh vault-init      # 产生【临时】recovery keys + root token，节点自动解封
+# 无需 vault-unseal：三台都会自动解封，逐台确认即可
+./setup-ha.sh status          # Sealed: false / Seal type: awskms
+```
+
+要点：
+
+- **KMS key 必须是旧集群那把**（同 key id、同 region）。配错 key 这一步不会报错——用任何 key 都能 init 成功——但下一步恢复完成后集群会 seal 死、数据无法解密
+- 其余与 Shamir 相同：`.env` 换新机器的 IP、CA 可以全新、node ID 可复用、**不要执行 `register-plugin`**
+- 这一步产生的临时 recovery keys 和 root token，唯一用途是把快照灌进去，灌完即作废
+
+#### 第二步：恢复快照（先试 `restore`，不行再 `restore-force`）
+
+与 Shamir 的关键差别：新集群与快照用的是**同一把 KMS key**，seal 一致性校验通常能直接通过，所以先用普通 `restore`：
+
+```bash
+# 用【临时】root token
+VAULT_TOKEN=<临时 root token> \
+  ./setup-ha.sh restore backups/vault-backup-YYYYMMDD_HHMMSS.snap
+```
+
+若仍被拒并提示 `snapshot-force`（某些 seal 配置差异会触发），再降级用 `restore-force`（需输入 `FORCE` 二次确认）。能走 `restore` 就不要绕过校验——这层校验同时也在防「灌错快照」。
+
+#### 第三步：等待自动解封（没有人工输 key 的环节）
+
+恢复完成后，Vault 直接用 KMS 解出快照里的 root key 并自动重载——这就是先决条件表第 2 条的兑现时刻。**recovery keys 在这里用不上**，它不是解封凭证。逐台确认：
+
+```bash
+./setup-ha.sh status          # Sealed: false
+```
+
+若节点卡在 sealed 不动：
+
+1. 查 KMS 连通性与 IAM 凭证：`docker compose -f docker-compose.ha.yml logs vault | grep -iE "kms|seal"`
+2. 重启容器触发启动时自动解封：`./setup-ha.sh stop && ./setup-ha.sh start`
+3. 日志报 KMS 解密失败 → 基本可断定配置的不是旧集群那把 key，回到第一步核对 `AWS_KMS_KEY_ID`
+
+集群恢复后就是旧集群了：**旧 root token 生效，临时那套 recovery keys / root token 彻底作废**。
+
+#### 第四步：验证
+
+与 Shamir 相同：
+
+```bash
+./setup-ha.sh raft-status                 # 3 个节点，1 个 leader
+./setup-ha.sh list-keys                   # key 数量应与灾难前一致
+./setup-ha.sh key-info <某个 external_id>  # 能算出 public_key = 私钥解密正常
+```
+
+#### 第五步：收尾
+
+与 Shamir 相同：删除临时的 `vault-init-keys.json`；取回或重签 `backups/backup.token`；客户端换用新集群的 `ca.pem` 并指向新地址。
+
+### 两个容易踩的点（两种模式通用）
 
 **为什么 peer 配置不会被覆盖。** 新集群的三个 node ID 和地址会被保留，不会变回旧集群的 IP。这一点由 `hashicorp/raft` 的 `Restore()` 明确保证：
 
@@ -827,7 +957,7 @@ set of unseal keys; use the snapshot-force API to bypass this check
 
 ### 演练
 
-**这套流程必须在真实环境演练过，才算数。** 拿 3 台临时机器，用一份真实快照走一遍全流程，确认 `list-keys` 的数量和 `key-info` 的公钥与灾难前一致。别等真出事才第一次执行 —— 那时你会同时面对生产中断和一个没验证过的手册。
+**这套流程必须在真实环境演练过，才算数。** 拿 3 台临时机器，用一份真实快照按你的模式走一遍全流程——Shamir 演练 `restore-force` + 旧 unseal keys 解封，awskms 演练同一把 KMS key 下的 `restore` + 自动解封——确认 `list-keys` 的数量和 `key-info` 的公钥与灾难前一致。别等真出事才第一次执行 —— 那时你会同时面对生产中断和一个没验证过的手册。
 
 ---
 
@@ -836,7 +966,7 @@ set of unseal keys; use the snapshot-force API to bypass this check
 - [ ] 所有节点启用 TLS（集群通信强制要求）
 - [ ] 使用正式 CA 证书（非自签名）用于生产
 - [ ] 初始化完成后撤销 Root Token：`vault token revoke <root-token>`
-- [ ] Unseal Keys 分发给不同管理员，物理隔离保管
+- [ ] Unseal keys（Shamir）/ recovery keys（awskms）分发给不同管理员，物理隔离保管
 - [ ] 配置 Vault 策略（最小权限）
 - [ ] 启用审计日志
 - [ ] 防火墙仅开放 8200/8201 给必要来源
@@ -844,6 +974,7 @@ set of unseal keys; use the snapshot-force API to bypass this check
 - [ ] 定期轮换 TLS 证书
 - [ ] 每小时自动备份（Raft 快照）
 - [ ] 快照推送到异地存储（S3），**不与 Vault 节点同生共死**（开启 `BACKUP_S3_ENABLED`，见 [备份到 S3](#备份到-s3可选)）
-- [ ] Unseal keys 离线保管，**与快照分开存放**（两者都丢 = 数据永久损毁）
-- [ ] 定期演练 [灾难恢复](#灾难恢复) 全流程（含 `restore-force` + 旧 key 解封）
+- [ ] Shamir：unseal keys 离线保管，**与快照分开存放**（两者都丢 = 数据永久损毁）
+- [ ] awskms：KMS key 加删除防护（拒绝 `ScheduleKeyDeletion`/`DisableKey` + 告警，见 [§8](#8-aws-kms-自动解封的注意事项)）；有跨 region 恢复需求用 multi-Region key
+- [ ] 定期演练 [灾难恢复](#灾难恢复) 全流程（Shamir 含 `restore-force` + 旧 key 解封；awskms 含同一 KMS key 自动解封）
 - [ ] 监控集群健康状态（Prometheus + `/v1/sys/health`）

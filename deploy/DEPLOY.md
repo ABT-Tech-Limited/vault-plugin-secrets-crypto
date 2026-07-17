@@ -355,11 +355,17 @@ VAULT_ADDR="https://127.0.0.1:8200"
 curl -s --cacert tls/ca.pem -X POST \
   -d '{"secret_shares":5,"secret_threshold":3}' \
   ${VAULT_ADDR}/v1/sys/init | python3 -m json.tool
+
+# AWS KMS 方式（auto-unseal 不接受 secret_shares/secret_threshold，
+# 改传 recovery_shares/recovery_threshold；setup.sh 会自动按模式选择）
+curl -s --cacert tls/ca.pem -X POST \
+  -d '{"recovery_shares":5,"recovery_threshold":3}' \
+  ${VAULT_ADDR}/v1/sys/init | python3 -m json.tool
 ```
 
 初始化输出包含：
 
-- **Unseal Keys**（Shamir 方式）或 **Recovery Keys**（AWS KMS 方式）
+- **Unseal Keys**（Shamir 方式，字段 `keys`）或 **Recovery Keys**（AWS KMS 方式，字段 `recovery_keys`；不用于解封，是 root token 丢失后唯一的补救手段）
 - **Root Token**
 
 > **安全警告：** 立即安全保存这些信息！Root Token 和 Unseal Keys 只在初始化时输出一次。
@@ -567,7 +573,7 @@ make deploy-backup
 # 格式：backups/vault-backup-YYYYMMDD_HHMMSS.snap
 ```
 
-快照包含所有 Vault 数据（已加密），恢复时需要对应的 unseal keys。
+快照包含所有 Vault 数据（已加密）。能否恢复取决于 seal 的信任根：Shamir 模式需要**对应的 unseal keys**；AWS KMS 模式需要**加密快照的那把 KMS key 仍存在且可用**（key 被删则所有快照永久无法解密）。
 
 ### 恢复
 
@@ -579,7 +585,7 @@ make deploy-backup
 make deploy-restore SNAPSHOT=backups/vault-backup-20250215_120000.snap
 ```
 
-恢复操作会**覆盖**当前所有 Vault 数据。恢复后 Vault 会自动重启，Shamir 模式下需要重新解封。
+恢复操作会**覆盖**当前所有 Vault 数据。恢复后 Vault 会自动重启：Shamir 模式下需要重新解封；AWS KMS 模式下自动解封，无需操作。
 
 ### 备份建议
 
@@ -587,7 +593,8 @@ make deploy-restore SNAPSHOT=backups/vault-backup-20250215_120000.snap
 - 备份文件加密存储（快照本身已加密，但建议额外加密传输）
 - 定期测试恢复流程
 - 保留最近 30 天的备份
-- **Unseal Keys 和 Root Token 单独备份，不与数据备份放在一起**
+- **Unseal Keys / Recovery Keys 和 Root Token 单独备份，不与数据备份放在一起**
+- AWS KMS 模式：给 KMS key 加删除防护（拒绝 `ScheduleKeyDeletion` + 告警）——key 与快照同失 = 数据永久损毁
 
 **自动备份 cron 示例：**
 
