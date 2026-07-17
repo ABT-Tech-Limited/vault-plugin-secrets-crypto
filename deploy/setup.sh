@@ -542,6 +542,7 @@ cmd_stop() {
 cmd_vault_init() {
   local addr
   addr="$(vault_addr)"
+  local unseal="${UNSEAL_METHOD:-shamir}"
   local shares="${KEY_SHARES:-5}"
   local threshold="${KEY_THRESHOLD:-3}"
 
@@ -553,30 +554,73 @@ cmd_vault_init() {
     return
   fi
 
-  info "Initializing Vault (shares=${shares}, threshold=${threshold})..."
+  # Auto-unseal seals wrap the barrier key themselves, so /sys/init rejects
+  # secret_shares/secret_threshold ("parameters ... not applicable to seal
+  # type awskms"). What init splits into shares there is the RECOVERY key,
+  # requested via recovery_shares/recovery_threshold instead.
+  local payload
+  if [ "$unseal" = "awskms" ]; then
+    info "Initializing Vault with AWS KMS auto-unseal (recovery_shares=${shares}, recovery_threshold=${threshold})..."
+    payload="{\"recovery_shares\":${shares},\"recovery_threshold\":${threshold}}"
+  else
+    info "Initializing Vault (shares=${shares}, threshold=${threshold})..."
+    payload="{\"secret_shares\":${shares},\"secret_threshold\":${threshold}}"
+  fi
+
   local result
-  result=$(curl_vault -X POST \
-    -d "{\"secret_shares\":${shares},\"secret_threshold\":${threshold}}" \
-    "${addr}/v1/sys/init")
+  if ! result=$(curl_vault -S -X POST -d "$payload" "${addr}/v1/sys/init" 2>&1); then
+    error "Cannot reach Vault at ${addr}: ${result}"
+    exit 1
+  fi
+
+  # /sys/init reports failures (bad params, seal errors) in an "errors"
+  # array with no root_token; never save an error body as the keys file.
+  local api_err
+  api_err=$(echo "$result" | python3 -c "import sys,json; print('; '.join(json.load(sys.stdin).get('errors') or []))" 2>/dev/null || echo "")
+  if [ -n "$api_err" ]; then
+    error "Vault initialization failed: ${api_err}"
+    exit 1
+  fi
+
+  local root_token
+  root_token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('root_token',''))" 2>/dev/null || echo "")
+  if [ -z "$root_token" ]; then
+    error "Vault initialization failed (no root_token in response):"
+    echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
+    exit 1
+  fi
 
   echo "$result" > vault-init-keys.json
   chmod 600 vault-init-keys.json
 
-  ok "Vault initialized! Keys saved to vault-init-keys.json"
-  echo ""
-  echo -e "${RED}===========================================================${NC}"
-  echo -e "${RED}  CRITICAL: Securely store vault-init-keys.json NOW!${NC}"
-  echo -e "${RED}  It contains the unseal keys and root token.${NC}"
-  echo -e "${RED}  Distribute unseal keys to different administrators.${NC}"
-  echo -e "${RED}  Delete this file after securely backing up the keys.${NC}"
-  echo -e "${RED}===========================================================${NC}"
+  if [ "$unseal" = "awskms" ]; then
+    ok "Vault initialized! Recovery keys saved to vault-init-keys.json"
+    echo ""
+    echo -e "${RED}===========================================================${NC}"
+    echo -e "${RED}  CRITICAL: Securely store vault-init-keys.json NOW!${NC}"
+    echo -e "${RED}  It contains the RECOVERY keys and root token.${NC}"
+    echo -e "${RED}  Recovery keys do NOT unseal Vault (AWS KMS does), but${NC}"
+    echo -e "${RED}  they are the only way to regenerate a lost root token.${NC}"
+    echo -e "${RED}  Distribute them to different administrators.${NC}"
+    echo -e "${RED}  Delete this file after securely backing up the keys.${NC}"
+    echo -e "${RED}===========================================================${NC}"
+  else
+    ok "Vault initialized! Keys saved to vault-init-keys.json"
+    echo ""
+    echo -e "${RED}===========================================================${NC}"
+    echo -e "${RED}  CRITICAL: Securely store vault-init-keys.json NOW!${NC}"
+    echo -e "${RED}  It contains the unseal keys and root token.${NC}"
+    echo -e "${RED}  Distribute unseal keys to different administrators.${NC}"
+    echo -e "${RED}  Delete this file after securely backing up the keys.${NC}"
+    echo -e "${RED}===========================================================${NC}"
+  fi
   echo ""
 
-  # Display root token
-  local root_token
-  root_token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('root_token',''))" 2>/dev/null || echo "")
-  if [ -n "$root_token" ]; then
-    info "Root Token: ${root_token}"
+  info "Root Token: ${root_token}"
+
+  if [ "$unseal" = "awskms" ]; then
+    echo ""
+    echo -e "${YELLOW}Vault unsealed itself via AWS KMS during init -- no manual unseal needed.${NC}"
   fi
 }
 
@@ -1050,7 +1094,11 @@ cmd_restore() {
 
   if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
     ok "Snapshot restored successfully!"
-    warn "Vault will restart automatically. You may need to unseal again (Shamir mode)."
+    if [ "${UNSEAL_METHOD:-shamir}" = "awskms" ]; then
+      info "Vault auto-unseals via AWS KMS after applying the snapshot."
+    else
+      warn "Vault will restart automatically. You may need to unseal again (Shamir mode)."
+    fi
     info "Run: ./setup.sh status"
   else
     error "Restore failed (HTTP ${http_code}). Check your token permissions."

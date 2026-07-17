@@ -11,7 +11,8 @@
 #   start           Start Vault container on this node
 #   stop            Stop Vault container on this node
 #   vault-init      Initialize Vault cluster (run on node-1 only)
-#   vault-unseal    Unseal Vault on this node (Shamir mode)
+#                   (shamir: unseal keys; awskms: recovery keys + auto-unseal)
+#   vault-unseal    Unseal Vault on this node (Shamir; status check for awskms)
 #   register-plugin Register and enable the crypto plugin (run on leader only)
 #   status          Show this node's Vault status
 #   raft-status     Show Raft cluster member list
@@ -299,6 +300,7 @@ cmd_vault_init() {
 
   local addr
   addr="$(vault_addr)"
+  local unseal="${UNSEAL_METHOD:-shamir}"
   local shares="${KEY_SHARES:-5}"
   local threshold="${KEY_THRESHOLD:-3}"
 
@@ -310,35 +312,79 @@ cmd_vault_init() {
     return
   fi
 
-  info "Initializing Vault cluster (shares=${shares}, threshold=${threshold})..."
+  # Auto-unseal seals wrap the barrier key themselves, so /sys/init rejects
+  # secret_shares/secret_threshold ("parameters ... not applicable to seal
+  # type awskms"). What init splits into shares there is the RECOVERY key,
+  # requested via recovery_shares/recovery_threshold instead.
+  local payload
+  if [ "$unseal" = "awskms" ]; then
+    info "Initializing Vault cluster with AWS KMS auto-unseal (recovery_shares=${shares}, recovery_threshold=${threshold})..."
+    payload="{\"recovery_shares\":${shares},\"recovery_threshold\":${threshold}}"
+  else
+    info "Initializing Vault cluster (shares=${shares}, threshold=${threshold})..."
+    payload="{\"secret_shares\":${shares},\"secret_threshold\":${threshold}}"
+  fi
+
   local result
-  result=$(curl_vault -X POST \
-    -d "{\"secret_shares\":${shares},\"secret_threshold\":${threshold}}" \
-    "${addr}/v1/sys/init")
+  if ! result=$(curl_vault -S -X POST -d "$payload" "${addr}/v1/sys/init" 2>&1); then
+    error "Cannot reach Vault at ${addr}: ${result}"
+    exit 1
+  fi
+
+  # /sys/init reports failures (bad params, seal errors) in an "errors"
+  # array with no root_token; never save an error body as the keys file.
+  local api_err
+  api_err=$(echo "$result" | python3 -c "import sys,json; print('; '.join(json.load(sys.stdin).get('errors') or []))" 2>/dev/null || echo "")
+  if [ -n "$api_err" ]; then
+    error "Vault initialization failed: ${api_err}"
+    exit 1
+  fi
+
+  local root_token
+  root_token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('root_token',''))" 2>/dev/null || echo "")
+  if [ -z "$root_token" ]; then
+    error "Vault initialization failed (no root_token in response):"
+    echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
+    exit 1
+  fi
 
   echo "$result" > vault-init-keys.json
   chmod 600 vault-init-keys.json
 
-  ok "Vault cluster initialized! Keys saved to vault-init-keys.json"
-  echo ""
-  echo -e "${RED}===========================================================${NC}"
-  echo -e "${RED}  CRITICAL: Securely store vault-init-keys.json NOW!${NC}"
-  echo -e "${RED}  It contains the unseal keys and root token.${NC}"
-  echo -e "${RED}  Distribute unseal keys to different administrators.${NC}"
-  echo -e "${RED}  Delete this file after securely backing up the keys.${NC}"
-  echo -e "${RED}===========================================================${NC}"
-  echo ""
-
-  # Display root token
-  local root_token
-  root_token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('root_token',''))" 2>/dev/null || echo "")
-  if [ -n "$root_token" ]; then
-    info "Root Token: ${root_token}"
+  if [ "$unseal" = "awskms" ]; then
+    ok "Vault cluster initialized! Recovery keys saved to vault-init-keys.json"
+    echo ""
+    echo -e "${RED}===========================================================${NC}"
+    echo -e "${RED}  CRITICAL: Securely store vault-init-keys.json NOW!${NC}"
+    echo -e "${RED}  It contains the RECOVERY keys and root token.${NC}"
+    echo -e "${RED}  Recovery keys do NOT unseal Vault (AWS KMS does), but${NC}"
+    echo -e "${RED}  they are the only way to regenerate a lost root token.${NC}"
+    echo -e "${RED}  Distribute them to different administrators.${NC}"
+    echo -e "${RED}  Delete this file after securely backing up the keys.${NC}"
+    echo -e "${RED}===========================================================${NC}"
+  else
+    ok "Vault cluster initialized! Keys saved to vault-init-keys.json"
+    echo ""
+    echo -e "${RED}===========================================================${NC}"
+    echo -e "${RED}  CRITICAL: Securely store vault-init-keys.json NOW!${NC}"
+    echo -e "${RED}  It contains the unseal keys and root token.${NC}"
+    echo -e "${RED}  Distribute unseal keys to different administrators.${NC}"
+    echo -e "${RED}  Delete this file after securely backing up the keys.${NC}"
+    echo -e "${RED}===========================================================${NC}"
   fi
+  echo ""
+
+  info "Root Token: ${root_token}"
 
   echo ""
-  echo -e "${YELLOW}Next: Unseal this node, then unseal the other nodes.${NC}"
-  echo -e "${YELLOW}The same unseal keys work on ALL nodes in the cluster.${NC}"
+  if [ "$unseal" = "awskms" ]; then
+    echo -e "${YELLOW}This node unsealed itself via AWS KMS during init.${NC}"
+    echo -e "${YELLOW}Other nodes auto-unseal as they join -- no manual unseal needed.${NC}"
+    echo -e "${YELLOW}Verify each node with: ./setup-ha.sh status${NC}"
+  else
+    echo -e "${YELLOW}Next: Unseal this node, then unseal the other nodes.${NC}"
+    echo -e "${YELLOW}The same unseal keys work on ALL nodes in the cluster.${NC}"
+  fi
 }
 
 cmd_vault_unseal() {
@@ -990,9 +1036,12 @@ cmd_backup() {
 #                  cluster. Correct for rolling back data within one cluster.
 # restore-force -> sys/storage/raft/snapshot-force
 #                  Bypasses that check. Required to rebuild a destroyed cluster
-#                  on fresh servers, where the new cluster's Shamir keys cannot
-#                  match the snapshot's. Afterwards every node seals itself and
-#                  must be unsealed with the ORIGINAL cluster's unseal keys.
+#                  on fresh servers when the current seal cannot open the
+#                  snapshot: always the case for Shamir (new keys never match);
+#                  for awskms only when the KMS key differs -- reusing the same
+#                  KMS key usually lets plain `restore` pass. Afterwards Shamir
+#                  nodes seal and need the ORIGINAL cluster's unseal keys;
+#                  awskms nodes reload the root key via KMS automatically.
 _restore_snapshot() {
   local snapshot_file="$1"
   local force="$2"
@@ -1017,6 +1066,7 @@ _restore_snapshot() {
 
   local addr
   addr="$(vault_addr)"
+  local unseal="${UNSEAL_METHOD:-shamir}"
 
   # Check Vault is unsealed
   local sealed
@@ -1044,9 +1094,16 @@ _restore_snapshot() {
     echo ""
     warn "FORCE mode: the seal-consistency check is bypassed."
     warn "Only use this to rebuild a destroyed cluster on fresh servers."
-    warn "After the restore ALL nodes will seal. You will then need the"
-    warn "ORIGINAL cluster's unseal keys -- the ones matching this snapshot."
-    warn "Without them the restored data is unrecoverable."
+    if [ "$unseal" = "awskms" ]; then
+      warn "This only works if the cluster is configured with the SAME AWS"
+      warn "KMS key that protected the snapshot's cluster. Nodes then reload"
+      warn "the restored root key via KMS automatically (no manual unseal)."
+      warn "With a different KMS key the restored data is unrecoverable."
+    else
+      warn "After the restore ALL nodes will seal. You will then need the"
+      warn "ORIGINAL cluster's unseal keys -- the ones matching this snapshot."
+      warn "Without them the restored data is unrecoverable."
+    fi
     echo ""
     echo -n "Type FORCE to proceed: "
     read -r confirm
@@ -1079,13 +1136,25 @@ _restore_snapshot() {
     ok "Snapshot restored successfully!"
     if [ "$force" = true ]; then
       echo ""
-      warn "Every node is now sealed. Unseal all 3 with the ORIGINAL cluster's"
-      warn "unseal keys (not the ones from the temporary cluster's vault-init)."
-      info "On each node: ./setup-ha.sh vault-unseal"
-      info "Then verify:  ./setup-ha.sh raft-status && ./setup-ha.sh list-keys"
+      if [ "$unseal" = "awskms" ]; then
+        info "Nodes reload the restored root key via AWS KMS automatically;"
+        info "no manual unseal is needed. If a node stays sealed, check KMS"
+        info "connectivity/credentials and restart it (stop && start)."
+        info "Verify: ./setup-ha.sh status && ./setup-ha.sh raft-status && ./setup-ha.sh list-keys"
+      else
+        warn "Every node is now sealed. Unseal all 3 with the ORIGINAL cluster's"
+        warn "unseal keys (not the ones from the temporary cluster's vault-init)."
+        info "On each node: ./setup-ha.sh vault-unseal"
+        info "Then verify:  ./setup-ha.sh raft-status && ./setup-ha.sh list-keys"
+      fi
     else
-      warn "Vault will restart automatically. You may need to unseal all nodes again (Shamir mode)."
-      info "Run: ./setup-ha.sh status"
+      if [ "$unseal" = "awskms" ]; then
+        info "Nodes auto-unseal via AWS KMS after applying the snapshot."
+        info "Run: ./setup-ha.sh status"
+      else
+        warn "Vault will restart automatically. You may need to unseal all nodes again (Shamir mode)."
+        info "Run: ./setup-ha.sh status"
+      fi
     fi
     return
   fi
@@ -1096,7 +1165,8 @@ _restore_snapshot() {
   # Vault's own hint when the snapshot belongs to a different cluster.
   if [ "$force" != true ] && echo "$body" | grep -q "snapshot-force"; then
     echo ""
-    error "This snapshot was taken from a cluster with different unseal keys."
+    error "The current seal cannot verify this snapshot: it was taken under"
+    error "different unseal keys (Shamir) or a different KMS key (awskms)."
     error "To rebuild a destroyed cluster on fresh servers, use:"
     error "  ./setup-ha.sh restore-force ${snapshot_file}"
     error "See DEPLOY_HA.md -> 灾难恢复 before doing so."
@@ -1256,7 +1326,9 @@ cmd_help() {
   echo "  start           Start Vault container on this node"
   echo "  stop            Stop Vault container on this node"
   echo "  vault-init      Initialize Vault cluster (run on node-1 only)"
-  echo "  vault-unseal    Unseal Vault on this node (Shamir mode)"
+  echo "                  (shamir: creates unseal keys; awskms: creates recovery"
+  echo "                   keys, nodes auto-unseal via KMS)"
+  echo "  vault-unseal    Unseal Vault on this node (Shamir; status check for awskms)"
   echo "  register-plugin Register and enable the crypto plugin (run on leader only)"
   echo ""
   echo "Operations:"
@@ -1274,7 +1346,8 @@ cmd_help() {
   echo ""
   echo "Disaster recovery:"
   echo "  restore-force    Restore a snapshot into a FRESH cluster (bypasses seal check)"
-  echo "                   Requires the ORIGINAL cluster's unseal keys afterwards."
+  echo "                   shamir: requires the ORIGINAL cluster's unseal keys afterwards"
+  echo "                   awskms: auto-unseals again, but ONLY with the same KMS key"
   echo "                   See DEPLOY_HA.md -> 灾难恢复"
   echo ""
   echo "  help             Show this help message"
