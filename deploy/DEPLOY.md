@@ -12,6 +12,7 @@
 - [方案 B：AWS KMS 自动解封](#方案-baws-kms-自动解封)
 - [Vault 初始化与解封](#vault-初始化与解封)
 - [插件注册与启用](#插件注册与启用)
+- [插件升级](#插件升级)
 - [审计日志与访问策略](#审计日志与访问策略)
 - [健康检查与验证](#健康检查与验证)
 - [备份与恢复](#备份与恢复)
@@ -153,6 +154,7 @@ deploy/
 ├── .env                       # 环境变量（从 .env.example 复制，不提交 Git）
 ├── setup.sh                   # 部署辅助脚本
 ├── DEPLOY.md                  # 本文档
+├── plugins/                   # 插件二进制（linux/amd64，git 跟踪，make build 后复制进来）
 ├── config/                    # [自动生成] Vault 运行配置
 │   └── vault.hcl
 ├── tls/                       # [自动生成/手动放置] TLS 证书
@@ -181,8 +183,8 @@ cd deploy
 cp .env.example .env
 # 编辑 .env，至少修改 VAULT_FQDN
 
-# 3. 构建插件（需要 Go）
-cd .. && make build && cd deploy
+# 3. 构建插件并放入 plugins/（需要 Go；版本号取自 internal/backend/backend.go）
+cd .. && make build && cp build/vault-plugin-crypto-v0.2.0 deploy/plugins/ && cd deploy
 
 # 4. 一键部署
 ./setup.sh all
@@ -201,7 +203,7 @@ cp .env.example .env
 #   AWS_REGION=us-east-1
 #   AWS_KMS_KEY_ID=xxx
 
-cd .. && make build && cd deploy
+cd .. && make build && cp build/vault-plugin-crypto-v0.2.0 deploy/plugins/ && cd deploy
 ./setup.sh all
 ```
 
@@ -417,7 +419,7 @@ PLUGIN_VERSION="v0.2.0"
 PLUGIN_BINARY="vault-plugin-crypto-${PLUGIN_VERSION}"
 
 # 1. 计算 SHA256
-SHA256=$(shasum -a 256 ../build/${PLUGIN_BINARY} | cut -d ' ' -f1)
+SHA256=$(shasum -a 256 plugins/${PLUGIN_BINARY} | cut -d ' ' -f1)
 
 # 2. 注册插件
 curl -s --cacert tls/ca.pem -X POST \
@@ -445,7 +447,7 @@ export VAULT_CACERT="tls/ca.pem"
 vault login  # 输入 Root Token
 
 # 注册
-SHA256=$(shasum -a 256 ../build/vault-plugin-crypto-v0.2.0 | cut -d ' ' -f1)
+SHA256=$(shasum -a 256 plugins/vault-plugin-crypto-v0.2.0 | cut -d ' ' -f1)
 vault plugin register -sha256=${SHA256} -version=v0.2.0 secret vault-plugin-crypto
 
 # 启用
@@ -454,6 +456,96 @@ vault secrets enable -path=crypto -plugin-name=vault-plugin-crypto plugin
 # 验证
 vault secrets list -detailed
 ```
+
+---
+
+## 插件升级
+
+插件二进制以**版本号命名**（`vault-plugin-crypto-vX.Y.Z`），新旧版本在 `plugins/` 目录和 Vault 插件目录（catalog）里**共存**，升级是「注册新版本 → 切换挂载 → 重载」三步，随时可切回旧版本。全程在线，无需重启容器、无需重新解封。
+
+> `./setup.sh register-plugin` 只用于**首次**注册（它会同时挂载插件，挂载点已存在会失败）。升级走本节步骤。
+
+### 第一步：构建新版本并放入 plugins/
+
+```bash
+# 项目根目录：更新版本号常量（Makefile 从这里取 VERSION）
+vim internal/backend/backend.go   # Version = "v0.3.0"
+
+make build                        # 产出 build/vault-plugin-crypto-v0.3.0
+cp build/vault-plugin-crypto-v0.3.0 deploy/plugins/
+```
+
+同时更新 `deploy/.env` 中的 `PLUGIN_VERSION=v0.3.0`（`init-dirs` 的二进制检查和后续脚本命令都读它）。
+
+### 第二步：注册新版本并切换挂载
+
+```bash
+cd deploy
+VAULT_ADDR="https://127.0.0.1:8200"
+VAULT_TOKEN="<root token>"
+NEW_VERSION="v0.3.0"
+NEW_BINARY="vault-plugin-crypto-${NEW_VERSION}"
+SHA256=$(shasum -a 256 plugins/${NEW_BINARY} | cut -d ' ' -f1)
+
+# 1. 注册新版本（同名插件多版本共存，旧版本条目保留）
+curl -s --cacert tls/ca.pem -X POST \
+  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  -d "{\"sha256\":\"${SHA256}\",\"command\":\"${NEW_BINARY}\",\"version\":\"${NEW_VERSION}\"}" \
+  ${VAULT_ADDR}/v1/sys/plugins/catalog/secret/vault-plugin-crypto
+
+# 2. 把 crypto/ 挂载切换到新版本
+curl -s --cacert tls/ca.pem -X POST \
+  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  -d "{\"plugin_version\":\"${NEW_VERSION}\"}" \
+  ${VAULT_ADDR}/v1/sys/mounts/crypto/tune
+
+# 3. 重载插件进程，使新版本生效
+curl -s --cacert tls/ca.pem -X PUT \
+  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  -d '{"plugin":"vault-plugin-crypto"}' \
+  ${VAULT_ADDR}/v1/sys/plugins/reload/backend
+```
+
+### 第三步：验证
+
+```bash
+# 挂载配置的版本 与 实际运行的版本，两者都应为新版本
+curl -s --cacert tls/ca.pem -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  ${VAULT_ADDR}/v1/sys/mounts/crypto/tune | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['plugin_version'])"
+curl -s --cacert tls/ca.pem -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  ${VAULT_ADDR}/v1/sys/mounts | python3 -c "import sys,json; print(json.load(sys.stdin)['crypto/']['running_plugin_version'])"
+
+# 数据完好：列出 key、抽查一个 key 的公钥能正常算出（= 私钥解密正常）
+curl -s --cacert tls/ca.pem -H "X-Vault-Token: ${VAULT_TOKEN}" "${VAULT_ADDR}/v1/crypto/keys?list=true"
+curl -s --cacert tls/ca.pem -H "X-Vault-Token: ${VAULT_TOKEN}" ${VAULT_ADDR}/v1/crypto/keys/<external_id>
+```
+
+### 回滚
+
+旧二进制和旧 catalog 条目都还在，切回去即可：
+
+```bash
+curl -s --cacert tls/ca.pem -X POST \
+  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  -d '{"plugin_version":"v0.2.0"}' \
+  ${VAULT_ADDR}/v1/sys/mounts/crypto/tune
+
+curl -s --cacert tls/ca.pem -X PUT \
+  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+  -d '{"plugin":"vault-plugin-crypto"}' \
+  ${VAULT_ADDR}/v1/sys/plugins/reload/backend
+```
+
+确认无误后再清理旧版本（可选）：从 `plugins/` 删除旧二进制，并删除 catalog 旧条目（`DELETE /v1/sys/plugins/catalog/secret/vault-plugin-crypto?version=v0.2.0`）。
+
+### 升级常见问题
+
+| 报错 / 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `checksums did not match` | `plugins/` 里的二进制与 catalog 注册的 SHA256 不一致 | 重新 `shasum -a 256` 并重新注册 |
+| `plugin version mismatch: ... reported version (...) did not match requested version (...)` | 二进制内的 `backend.go Version` 常量与注册时的 `version` 参数不一致 | 两边对齐后重新构建、注册 |
+| tune 后 `running_plugin_version` 仍是旧版本 | 没有执行 reload，或 reload 失败 | 重发 reload 请求，查容器日志 `docker compose -f docker-compose.prod.yml logs vault \| grep -i plugin` |
+| 升级后挂载不可用 | 新二进制损坏 / 架构不对（必须 linux/amd64） | `file plugins/<binary>` 检查，按上文回滚，再排查 |
 
 ---
 
@@ -656,15 +748,15 @@ docker compose -f docker-compose.prod.yml logs vault
 
 ```bash
 # SHA256 不匹配
-shasum -a 256 ../build/vault-plugin-crypto-v0.2.0
+shasum -a 256 plugins/vault-plugin-crypto-v0.2.0
 # 确保与注册时使用的值一致
 
 # 二进制架构不匹配（必须是 linux/amd64）
-file ../build/vault-plugin-crypto-v0.2.0
+file plugins/vault-plugin-crypto-v0.2.0
 # 应显示：ELF 64-bit LSB executable, x86-64
 
 # 权限问题
-ls -la ../build/vault-plugin-crypto-v0.2.0
+ls -la plugins/vault-plugin-crypto-v0.2.0
 # 确保文件可执行
 ```
 

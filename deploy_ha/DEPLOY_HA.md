@@ -20,6 +20,7 @@
   - [第九步：签发应用 token（任意节点）](#第九步签发应用-token任意节点)
 - [备份与恢复](#备份与恢复)
 - [日常运维](#日常运维)
+- [插件升级](#插件升级)
 - [故障转移](#故障转移)
 - [灾难恢复](#灾难恢复)
 - [安全加固清单](#安全加固清单)
@@ -832,6 +833,111 @@ Vault 对「token 无效」和「token 有效但无权限」返回的都是 `per
 ```bash
 docker compose -f docker-compose.ha.yml logs -f
 ```
+
+---
+
+## 插件升级
+
+插件二进制以**版本号命名**（`vault-plugin-crypto-vX.Y.Z`），新旧版本在 `plugins/` 目录和 Vault 插件目录（catalog）里**共存**。升级全程在线：不重启容器、不触发 seal、不需要重新解封。
+
+HA 集群下有两条与单机不同的铁律：
+
+1. **二进制必须先出现在全部 3 个节点的 `plugins/` 目录里**。插件的注册信息（catalog）和挂载配置经 Raft 复制到全集群，但二进制文件是节点本地的——哪台缺文件，哪台 reload 后就起不了插件进程。本仓库将二进制纳入 git 跟踪，`git pull` 即完成分发。
+2. **reload 必须带 `"scope": "global"`**。不带 scope 只重载接收请求的那一台，其余两台仍跑旧版本。
+
+> `./setup-ha.sh register-plugin` 只用于**首次**注册（它会同时挂载插件，挂载点已存在会失败）。升级走本节步骤。
+
+### 第一步：构建新版本并分发到所有节点
+
+```bash
+# 开发机，项目根目录：更新版本号常量（Makefile 从这里取 VERSION）
+vim internal/backend/backend.go   # Version = "v0.3.0"
+
+make build                        # 产出 build/vault-plugin-crypto-v0.3.0
+cp build/vault-plugin-crypto-v0.3.0 deploy_ha/plugins/
+git add deploy_ha/plugins/vault-plugin-crypto-v0.3.0 && git commit && git push
+```
+
+```bash
+# 三台节点逐台执行：拉取二进制 + 更新版本变量
+git pull
+vim .env                          # PLUGIN_VERSION=v0.3.0
+
+# 确认三台的 SHA256 完全一致（哪台不一致，哪台 reload 会失败）
+shasum -a 256 plugins/vault-plugin-crypto-v0.3.0
+```
+
+### 第二步：注册新版本并切换挂载（任一已解封节点执行一次）
+
+写请求自动转发给 leader，catalog 与挂载配置经 Raft 同步到全集群：
+
+```bash
+ADDR=https://127.0.0.1:8200
+T=<root token>
+NEW_VERSION="v0.3.0"
+NEW_BINARY="vault-plugin-crypto-${NEW_VERSION}"
+SHA256=$(shasum -a 256 plugins/${NEW_BINARY} | cut -d ' ' -f1)
+
+# 1. 注册新版本（旧版本条目保留，随时可回滚）
+curl -s --cacert tls/ca.pem -X POST \
+  -H "X-Vault-Token: ${T}" \
+  -d "{\"sha256\":\"${SHA256}\",\"command\":\"${NEW_BINARY}\",\"version\":\"${NEW_VERSION}\"}" \
+  ${ADDR}/v1/sys/plugins/catalog/secret/vault-plugin-crypto
+
+# 2. 把 crypto/ 挂载切换到新版本
+curl -s --cacert tls/ca.pem -X POST \
+  -H "X-Vault-Token: ${T}" \
+  -d "{\"plugin_version\":\"${NEW_VERSION}\"}" \
+  ${ADDR}/v1/sys/mounts/crypto/tune
+
+# 3. 全集群重载插件进程 —— scope=global 是关键，三个节点一起切换
+curl -s --cacert tls/ca.pem -X PUT \
+  -H "X-Vault-Token: ${T}" \
+  -d '{"plugin":"vault-plugin-crypto","scope":"global"}' \
+  ${ADDR}/v1/sys/plugins/reload/backend
+```
+
+### 第三步：验证（三台都看）
+
+```bash
+# 挂载配置版本 与 实际运行版本，都应为新版本（任一节点查即可，配置是集群级的）
+curl -s --cacert tls/ca.pem -H "X-Vault-Token: ${T}" \
+  ${ADDR}/v1/sys/mounts/crypto/tune | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['plugin_version'])"
+curl -s --cacert tls/ca.pem -H "X-Vault-Token: ${T}" \
+  ${ADDR}/v1/sys/mounts | python3 -c "import sys,json; print(json.load(sys.stdin)['crypto/']['running_plugin_version'])"
+
+# 三台逐台：节点健康 + 插件进程真的起来了（能读 key = 新进程加载且解密正常）
+./setup-ha.sh status
+VAULT_TOKEN=${T} ./setup-ha.sh list-keys
+VAULT_TOKEN=${T} ./setup-ha.sh key-info <某个 external_id>
+```
+
+### 回滚
+
+旧二进制和旧 catalog 条目都在，切回去即可（同样 `scope=global`）：
+
+```bash
+curl -s --cacert tls/ca.pem -X POST \
+  -H "X-Vault-Token: ${T}" \
+  -d '{"plugin_version":"v0.2.0"}' \
+  ${ADDR}/v1/sys/mounts/crypto/tune
+
+curl -s --cacert tls/ca.pem -X PUT \
+  -H "X-Vault-Token: ${T}" \
+  -d '{"plugin":"vault-plugin-crypto","scope":"global"}' \
+  ${ADDR}/v1/sys/plugins/reload/backend
+```
+
+> 旧版本二进制**不要急着从 `plugins/` 删除**：它是回滚的前提，也是 [灾难恢复](#灾难恢复) 的硬依赖——快照里恢复出来的插件注册信息（含 SHA-256）指向哪个版本，`plugins/` 里就必须有哪个版本的二进制。确认新版本稳定、且最新快照已经指向新版本后，再考虑清理。
+
+### 升级常见问题
+
+| 报错 / 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `checksums did not match` | 某台节点 `plugins/` 里的二进制与 catalog 注册的 SHA256 不一致（多半是没 `git pull`） | 三台逐台 `shasum -a 256` 核对，补齐后重新 reload |
+| 只有一台切到新版本，另两台还是旧的 | reload 没带 `"scope": "global"` | 重发带 scope 的 reload 请求 |
+| `plugin version mismatch: ... reported version ... did not match requested version` | 二进制内的 `backend.go Version` 常量与注册时的 `version` 参数不一致 | 两边对齐后重新构建、分发、注册 |
+| reload 后某台挂载不可用 | 该台缺二进制 / 架构不对（必须 linux/amd64） | `file plugins/<binary>` 检查该台，按上文回滚，再排查 |
 
 ---
 
