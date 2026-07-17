@@ -64,6 +64,7 @@ deploy/logs/
 deploy/backups/
 deploy/vault-init-keys.json
 deploy/crypto-admin-token
+deploy/app.token
 
 # HA deployment secrets
 deploy_ha/.env
@@ -72,6 +73,7 @@ deploy_ha/config/
 deploy_ha/logs/
 deploy_ha/backups/
 deploy_ha/vault-init-keys.json
+deploy_ha/app.token
 
 .claude
 

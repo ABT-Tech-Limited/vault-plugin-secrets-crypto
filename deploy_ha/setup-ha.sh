@@ -17,6 +17,7 @@
 #   status          Show this node's Vault status
 #   raft-status     Show Raft cluster member list
 #   gen-backup-token Create a least-privilege backup token (run on leader)
+#   gen-app-token   Create a least-privilege app token for the crypto plugin API
 #   token-status    Show a token's TTL, policies and renewal health
 #   backup          Create a Raft snapshot backup (optional S3 upload, local retention)
 #   restore         Restore a snapshot into this cluster (seal check enforced)
@@ -766,16 +767,145 @@ path "auth/token/renew-self" {
   echo "  - Full crontab example (renew + backup): see DEPLOY_HA.md -> 自动备份"
 }
 
+cmd_gen_app_token() {
+  local addr
+  addr="$(vault_addr)"
+  local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
+  local policy_name="crypto-app"
+  local token_file="app.token"
+  local policy_only=false
+  [ "${1:-}" = "--policy-only" ] && policy_only=true
+
+  if [ "$policy_only" = true ]; then
+    info "Rewriting policy '${policy_name}' only; no new token will be created."
+  else
+    info "Generating a least-privilege application token via the Vault API (no vault CLI needed)..."
+  fi
+
+  # Root token (or any token allowed to write policies and create orphan
+  # tokens): prefer env, else prompt
+  local vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ]; then
+    echo -n "Enter Vault root token: "
+    read -r -s vault_token
+    echo ""
+  fi
+  if [ -z "$vault_token" ]; then
+    error "No token provided."
+    exit 1
+  fi
+
+  # 1. Policy covering exactly the crypto plugin's API surface (the four
+  #    paths registered in internal/backend/backend.go), nothing else.
+  #    `+` matches a single path segment, which cannot be escaped: a valid
+  #    external_id never contains `/`. LIST requests are ACL-checked with a
+  #    trailing slash on the path, hence the separate "keys/" rule.
+  #    lookup-self/renew-self are granted by the built-in `default` policy,
+  #    which this token opts out of via no_default_policy, so they must be
+  #    granted explicitly here.
+  info "Writing policy '${policy_name}' (create/list/read keys + sign + tx build)..."
+  local policy_hcl
+  policy_hcl=$(cat <<EOF
+path "${mount_path}/keys" {
+  capabilities = ["create", "update"]
+}
+path "${mount_path}/keys/" {
+  capabilities = ["list"]
+}
+path "${mount_path}/keys/+" {
+  capabilities = ["read"]
+}
+path "${mount_path}/keys/+/sign" {
+  capabilities = ["create", "update"]
+}
+path "${mount_path}/tx/build/evm" {
+  capabilities = ["create", "update"]
+}
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
+EOF
+)
+  local policy_payload
+  policy_payload=$(printf '%s' "$policy_hcl" | python3 -c 'import json,sys; print(json.dumps({"policy": sys.stdin.read()}))')
+
+  local code
+  # curl already emits "000" via -w on connection failure; do not append another.
+  code=$(curl_vault -X PUT \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "$policy_payload" \
+    -o /dev/null -w "%{http_code}" \
+    "${addr}/v1/sys/policies/acl/${policy_name}" 2>/dev/null || true)
+  code="${code:-000}"
+  if [ "$code" != "204" ] && [ "$code" != "200" ]; then
+    error "Failed to write policy '${policy_name}' (HTTP ${code})."
+    error "The token needs permission to write sys/policies/acl (root or equivalent)."
+    exit 1
+  fi
+  ok "Policy '${policy_name}' written"
+
+  # Policies are resolved by name on every request, so after a plugin upgrade
+  # adds endpoints, rerunning with --policy-only is enough -- already-issued
+  # app tokens pick up the new rules immediately.
+  if [ "$policy_only" = true ]; then
+    echo ""
+    ok "Existing tokens bound to '${policy_name}' picked up the new rules immediately."
+    info "Verify with: ./setup-ha.sh token-status --app-token"
+    return
+  fi
+
+  # 2. Create an orphan, periodic token bound to that policy, with no default
+  #    policy. no_parent -> survives revocation of the root token used here;
+  #    period -> renewable indefinitely, never hits a max TTL.
+  info "Creating periodic app token (period=720h, orphan, no default policy)..."
+  local create_payload
+  create_payload='{"policies":["'"${policy_name}"'"],"period":"720h","no_parent":true,"no_default_policy":true,"display_name":"crypto-app","meta":{"purpose":"application-access-to-crypto-plugin"}}'
+  local resp
+  resp=$(curl_vault -X POST \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "$create_payload" \
+    "${addr}/v1/auth/token/create" 2>/dev/null || echo "")
+
+  local app_token
+  app_token=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('client_token',''))" 2>/dev/null || echo "")
+  if [ -z "$app_token" ]; then
+    error "Token creation failed. Vault response:"
+    echo "$resp" | python3 -m json.tool 2>/dev/null || echo "$resp"
+    exit 1
+  fi
+
+  # 3. Persist with tight permissions, then display.
+  ( umask 077; printf '%s' "$app_token" > "$token_file" )
+  chmod 600 "$token_file"
+
+  ok "App token created and saved to ${token_file} (mode 600)"
+  echo ""
+  info "Token: ${app_token}"
+  echo ""
+  echo -e "${YELLOW}Next steps:${NC}"
+  echo "  - Hand the token to the application (env var / secret manager). It can"
+  echo "    ONLY call the ${mount_path} plugin API: create/list/read keys, sign,"
+  echo "    and tx/build/evm -- no other Vault paths."
+  echo "  - Check its TTL:  ./setup-ha.sh token-status --app-token"
+  echo "  - Periodic token (720h): the app (most Vault SDKs do this) or a cron"
+  echo "    must POST auth/token/renew-self before expiry."
+  echo "  - Plugin upgrade added endpoints? ./setup-ha.sh gen-app-token --policy-only"
+  echo "  - Usage examples: see DEPLOY_HA.md -> 签发应用 token"
+}
+
 cmd_token_status() {
   local addr
   addr="$(vault_addr)"
-  local token_file="backups/backup.token"
 
-  # Token source: --backup-token reads the saved backup token, VAULT_TOKEN wins
-  # over the prompt. Never accept a token as a positional argument: it would be
-  # visible in `ps` output and land in shell history.
+  # Token source: --backup-token / --app-token read the saved token files,
+  # VAULT_TOKEN wins over the prompt. Never accept a token as a positional
+  # argument: it would be visible in `ps` output and land in shell history.
   local vault_token=""
   if [ "${1:-}" = "--backup-token" ]; then
+    local token_file="backups/backup.token"
     if [ ! -f "$token_file" ]; then
       error "Backup token not found: ${token_file}"
       error "Create one with: ./setup-ha.sh gen-backup-token"
@@ -783,6 +913,15 @@ cmd_token_status() {
     fi
     vault_token=$(cat "$token_file")
     info "Using backup token from ${token_file}"
+  elif [ "${1:-}" = "--app-token" ]; then
+    local token_file="app.token"
+    if [ ! -f "$token_file" ]; then
+      error "App token not found: ${token_file}"
+      error "Create one with: ./setup-ha.sh gen-app-token"
+      exit 1
+    fi
+    vault_token=$(cat "$token_file")
+    info "Using app token from ${token_file}"
   else
     vault_token="${VAULT_TOKEN:-}"
     if [ -z "$vault_token" ]; then
@@ -818,8 +957,10 @@ cmd_token_status() {
       error "HTTP 403 on auth/token/lookup-self. Either:"
       error "  a) the token is invalid, expired or revoked; or"
       error "  b) the token's policy does not grant read on auth/token/lookup-self."
-      error "     (b) applies to backup tokens issued before that rule was added."
-      error "     Fix without reissuing the token: ./setup-ha.sh gen-backup-token --policy-only"
+      error "     (b) applies to tokens issued before that rule was added."
+      error "     Fix without reissuing the token:"
+      error "       backup token: ./setup-ha.sh gen-backup-token --policy-only"
+      error "       app token:    ./setup-ha.sh gen-app-token --policy-only"
       exit 1
       ;;
     503)
@@ -1336,7 +1477,11 @@ cmd_help() {
   echo "  raft-status      Show Raft cluster member list"
   echo "  gen-backup-token Create a least-privilege token for unattended backups"
   echo "                   (--policy-only rewrites the policy, keeps the existing token)"
-  echo "  token-status     Show a token's TTL and policies (add --backup-token to read backups/backup.token)"
+  echo "  gen-app-token    Create a least-privilege token for applications: crypto"
+  echo "                   plugin API only (create/list/read keys, sign, tx build)"
+  echo "                   (--policy-only rewrites the policy, e.g. after a plugin upgrade)"
+  echo "  token-status     Show a token's TTL and policies"
+  echo "                   (--backup-token / --app-token read the saved token files)"
   echo "  backup           Create a Raft snapshot backup (online, no downtime)"
   echo "                   (BACKUP_S3_ENABLED=true also uploads to S3; local copies"
   echo "                    older than BACKUP_LOCAL_RETENTION_DAYS days are pruned)"
@@ -1382,6 +1527,7 @@ case "$COMMAND" in
   status)          cmd_status ;;
   raft-status)     cmd_raft_status ;;
   gen-backup-token) cmd_gen_backup_token "${2:-}" ;;
+  gen-app-token)   cmd_gen_app_token "${2:-}" ;;
   token-status)    cmd_token_status "${2:-}" ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "${2:-}" ;;

@@ -17,6 +17,7 @@
   - [第六步：解封（所有节点）](#第六步解封所有节点)
   - [第七步：注册插件（Leader 节点）](#第七步注册插件leader-节点)
   - [第八步：验证集群（任意节点）](#第八步验证集群任意节点)
+  - [第九步：签发应用 token（任意节点）](#第九步签发应用-token任意节点)
 - [备份与恢复](#备份与恢复)
 - [日常运维](#日常运维)
 - [故障转移](#故障转移)
@@ -27,17 +28,20 @@
 
 ## 前置条件
 
-| 依赖 | 要求 | 说明 |
-|------|------|------|
-| 服务器 | 3 台 | 3 台 EC2，同一 AZ |
-| Docker Engine | 20.10+ | 每台服务器 |
-| Docker Compose | V2 | 每台服务器 |
-| openssl | - | TLS 证书生成 |
-| curl | - | API 调用 |
-| python3 | 3.6+ | JSON 解析 |
-| 网络 | 互通 | 端口 8200 (API) + 8201 (Raft) |
+
+| 依赖             | 要求     | 说明                          |
+| -------------- | ------ | --------------------------- |
+| 服务器            | 3 台    | 3 台 EC2，同一 AZ               |
+| Docker Engine  | 20.10+ | 每台服务器                       |
+| Docker Compose | V2     | 每台服务器                       |
+| openssl        | -      | TLS 证书生成                    |
+| curl           | -      | API 调用                      |
+| python3        | 3.6+   | JSON 解析                     |
+| 网络             | 互通     | 端口 8200 (API) + 8201 (Raft) |
+
 
 **网络要求：**
+
 - 3 台服务器之间 TCP 8200 和 8201 端口双向可达
 - 建议使用内网 IP 或专用网络
 - 防火墙需开放上述端口
@@ -68,12 +72,14 @@ Server 1 (vault-1)        Server 2 (vault-2)        Server 3 (vault-3)
 
 **关键概念：**
 
-| 概念 | 说明 |
-|------|------|
-| Leader | 处理所有写请求，通过 Raft 复制到 Follower |
-| Follower | 接收读请求（需 Token），写请求自动转发到 Leader |
-| Quorum | 3 节点集群中需要 2 个节点存活才能运作 |
-| retry_join | 节点启动后自动发现并加入集群 |
+
+| 概念         | 说明                             |
+| ---------- | ------------------------------ |
+| Leader     | 处理所有写请求，通过 Raft 复制到 Follower   |
+| Follower   | 接收读请求（需 Token），写请求自动转发到 Leader |
+| Quorum     | 3 节点集群中需要 2 个节点存活才能运作          |
+| retry_join | 节点启动后自动发现并加入集群                 |
+
 
 ---
 
@@ -81,13 +87,15 @@ Server 1 (vault-1)        Server 2 (vault-2)        Server 3 (vault-3)
 
 Vault 整合存储用 Raft 共识，可用的**投票节点必须超过半数**集群才能工作（quorum = ⌊N/2⌋ + 1）。所以节点数只能取奇数：
 
-| 节点数 | Quorum | 可容忍故障 | 评价 |
-|--------|--------|-----------|------|
-| 1 | 1 | 0 | 开发 / 测试，**无 HA** |
-| 2 | 2 | 0 | ❌ **绝不要用**：故障面翻倍却一台都挂不起 |
-| **3** | 2 | 1 | ✅ HA 的最小生产基线（**推荐起点**） |
-| 4 | 3 | 1 | ❌ 容错和 3 一样，更贵更慢 |
-| **5** | 3 | 2 | ✅ 关键业务，容忍 2 台同时故障 |
+
+| 节点数   | Quorum | 可容忍故障 | 评价                      |
+| ----- | ------ | ----- | ----------------------- |
+| 1     | 1      | 0     | 开发 / 测试，**无 HA**        |
+| 2     | 2      | 0     | ❌ **绝不要用**：故障面翻倍却一台都挂不起 |
+| **3** | 2      | 1     | ✅ HA 的最小生产基线（**推荐起点**）  |
+| 4     | 3      | 1     | ❌ 容错和 3 一样，更贵更慢         |
+| **5** | 3      | 2     | ✅ 关键业务，容忍 2 台同时故障       |
+
 
 **只用奇数（1/3/5），永远别用偶数。** 超过 5 台投票节点写入延迟会上升，再扩展请用 performance standby（非投票节点）。
 
@@ -106,16 +114,18 @@ Vault 整合存储用 Raft 共识，可用的**投票节点必须超过半数**�
 
 `.env` 中的 `UNSEAL_METHOD` 决定 Vault 的 seal 方式，两种都被本套工具链完整支持。它影响的不只是「重启要不要输 key」，而是**信任根**在哪里——这直接决定初始化产物、日常运维和灾难恢复的走法。本文档在每个有差异的环节都会分模式标注。
 
-| | `shamir`（默认） | `awskms` |
-|---|---|---|
-| 解封方式 | 人工输入 3/5 个 unseal key | 节点启动时经 AWS KMS 自动解封 |
-| `vault-init` 产物 | **unseal keys** + root token | **recovery keys** + root token（节点 init 完即已解封） |
-| 节点重启 / 加入 | 每次都需人工解封 | 全自动，无人工介入 |
-| 信任根 | unseal keys（由管理员持有） | 那把 **KMS key**（+ 对它的 IAM 权限） |
-| 灾难恢复 | `restore-force` + 用**旧 unseal keys** 人工解封 | 新集群配**同一把 KMS key**，恢复后自动解封（详见 [灾难恢复](#灾难恢复)） |
-| 致命丢失点 | unseal keys 丢失 → 快照永久无法解密 | KMS key 被删 → 快照永久无法解密 |
-| 额外依赖 | 无 | 节点解封时 KMS 必须可达；key 永不能删（见 [§8](#8-aws-kms-自动解封的注意事项)） |
-| `.env` 配置 | `UNSEAL_METHOD=shamir` | `UNSEAL_METHOD=awskms` + `AWS_REGION` / `AWS_KMS_KEY_ID`（凭证推荐 EC2 实例角色） |
+
+|                 | `shamir`（默认）                              | `awskms`                                                                |
+| --------------- | ----------------------------------------- | ----------------------------------------------------------------------- |
+| 解封方式            | 人工输入 3/5 个 unseal key                     | 节点启动时经 AWS KMS 自动解封                                                     |
+| `vault-init` 产物 | **unseal keys** + root token              | **recovery keys** + root token（节点 init 完即已解封）                           |
+| 节点重启 / 加入       | 每次都需人工解封                                  | 全自动，无人工介入                                                               |
+| 信任根             | unseal keys（由管理员持有）                       | 那把 **KMS key**（+ 对它的 IAM 权限）                                            |
+| 灾难恢复            | `restore-force` + 用**旧 unseal keys** 人工解封 | 新集群配**同一把 KMS key**，恢复后自动解封（详见 [灾难恢复](#灾难恢复)）                           |
+| 致命丢失点           | unseal keys 丢失 → 快照永久无法解密                 | KMS key 被删 → 快照永久无法解密                                                   |
+| 额外依赖            | 无                                         | 节点解封时 KMS 必须可达；key 永不能删（见 [§8](#8-aws-kms-自动解封的注意事项)）                   |
+| `.env` 配置       | `UNSEAL_METHOD=shamir`                    | `UNSEAL_METHOD=awskms` + `AWS_REGION` / `AWS_KMS_KEY_ID`（凭证推荐 EC2 实例角色） |
+
 
 **怎么选**：接受「每次重启有人到场输 key」的运维成本、不想引入对 AWS KMS 的依赖 → Shamir；希望重启 / 换实例免人工、能接受把信任根托付给一把 KMS key 并为它做好防删除保护 → awskms。
 
@@ -157,14 +167,16 @@ deploy_ha/
 
 ### 1. 网络与实例
 
-| 项 | 配置 |
-|----|------|
-| VPC | 1 个（已有或新建） |
-| 子网 | 1 个私有子网（单 AZ，例如 `us-east-1a`） |
-| EC2 | 3 台，同一 AZ |
+
+| 项    | 配置                                           |
+| ---- | -------------------------------------------- |
+| VPC  | 1 个（已有或新建）                                   |
+| 子网   | 1 个私有子网（单 AZ，例如 `us-east-1a`）                |
+| EC2  | 3 台，同一 AZ                                    |
 | 实例规格 | 内存敏感，建议 `m5.large`（2 vCPU / 8 GiB）量级起步，按负载调整 |
-| AMI | Amazon Linux 2023 或 Ubuntu 22.04+ |
-| 软件 | Docker Engine 20.10+ 与 Docker Compose V2 |
+| AMI  | Amazon Linux 2023 或 Ubuntu 22.04+            |
+| 软件   | Docker Engine 20.10+ 与 Docker Compose V2     |
+
 
 **主机准备（每台）**：
 
@@ -183,12 +195,14 @@ deploy_ha/
 
 3 台 EC2 用同一个安全组 `sg-vault`：
 
-| 方向 | 端口 | 协议 | 来源 / 目标 | 用途 |
-|------|------|------|-------------|------|
-| 入站 | 8200 | TCP | 客户端 / 应用 SG；走 NLB 时另加 NLB 的 SG | Vault API（含 NLB 健康检查） |
-| 入站 | 8201 | TCP | `sg-vault` 自身 | Raft 集群通信（仅节点间） |
-| 入站 | 22 | TCP | 堡垒机 SG（或不开，用 SSM） | 运维登录 |
-| 出站 | 443 | TCP | 0.0.0.0/0 | 拉镜像等（按需收紧） |
+
+| 方向  | 端口   | 协议  | 来源 / 目标                        | 用途                    |
+| --- | ---- | --- | ------------------------------ | --------------------- |
+| 入站  | 8200 | TCP | 客户端 / 应用 SG；走 NLB 时另加 NLB 的 SG | Vault API（含 NLB 健康检查） |
+| 入站  | 8201 | TCP | `sg-vault` 自身                  | Raft 集群通信（仅节点间）       |
+| 入站  | 22   | TCP | 堡垒机 SG（或不开，用 SSM）              | 运维登录                  |
+| 出站  | 443  | TCP | 0.0.0.0/0                      | 拉镜像等（按需收紧）            |
+
 
 > 8201 用**安全组自引用**（来源填 `sg-vault` 自己），只有集群内节点能互联，外部访问不到 Raft 端口。
 
@@ -232,24 +246,28 @@ clients ──▶ NLB（TCP :8200 直通，不解密）──▶ vault-1 / vault
 
 **NLB 与 target group 配置：**
 
-| 项 | 配置 |
-|----|------|
-| 负载均衡器 | Network Load Balancer，**internal**（内网型），创建时挂好安全组（事后不能补挂） |
-| 监听器 | TCP :8200 → target group（**TLS 直通**，LB 不解密，端到端 TLS 与 CA 均不变） |
-| Target group | 协议 TCP，端口 8200，target type `instance`，注册 3 台 EC2 |
-| 健康检查协议 | HTTPS（LB 健康检查**不校验证书**，自签 CA 无碍） |
-| 健康检查端口 | traffic-port（8200） |
-| 健康检查路径 | `/v1/sys/health?standbyok=true` |
-| 间隔 / 阈值 | 10 秒，健康 / 不健康阈值各 2 次 |
+
+| 项            | 配置                                                           |
+| ------------ | ------------------------------------------------------------ |
+| 负载均衡器        | Network Load Balancer，**internal**（内网型），创建时挂好安全组（事后不能补挂）     |
+| 监听器          | TCP :8200 → target group（**TLS 直通**，LB 不解密，端到端 TLS 与 CA 均不变） |
+| Target group | 协议 TCP，端口 8200，target type `instance`，注册 3 台 EC2             |
+| 健康检查协议       | HTTPS（LB 健康检查**不校验证书**，自签 CA 无碍）                             |
+| 健康检查端口       | traffic-port（8200）                                           |
+| 健康检查路径       | `/v1/sys/health?standbyok=true`                              |
+| 间隔 / 阈值      | 10 秒，健康 / 不健康阈值各 2 次                                         |
+
 
 健康检查按 `/v1/sys/health` 的返回码判定（NLB 默认 200–399 视为健康）：
 
-| 返回码 | 节点状态 | 判定 |
-|--------|---------|------|
+
+| 返回码 | 节点状态                                        | 判定     |
+| --- | ------------------------------------------- | ------ |
 | 200 | leader；带 `standbyok=true` 时 standby 也返回 200 | ✅ 留在池内 |
-| 429 | standby（不带 `standbyok`） | ❌ 摘除 |
-| 501 | 未初始化 | ❌ 摘除 |
-| 503 | sealed | ❌ 摘除 |
+| 429 | standby（不带 `standbyok`）                     | ❌ 摘除   |
+| 501 | 未初始化                                        | ❌ 摘除   |
+| 503 | sealed                                      | ❌ 摘除   |
+
 
 路径带不带 `standbyok=true` 是两种策略：
 
@@ -362,13 +380,15 @@ vim .env
 
 **各节点 .env 差异对照：**（AWS 私网 IP 部署：`VAULT_FQDN` 与 `VAULT_SAN_IP` 均填各节点私网 IP，详见上文「AWS 单 AZ 部署」§4）
 
-| 变量 | 节点 1 | 节点 2 | 节点 3 |
-|------|--------|--------|--------|
-| `VAULT_CONTAINER_NAME` | vault-ha-1 | vault-ha-2 | vault-ha-3 |
-| `VAULT_DATA_VOLUME` | vault-ha-data-1 | vault-ha-data-2 | vault-ha-data-3 |
-| `VAULT_NODE_ID` | vault-1 | vault-2 | vault-3 |
-| `VAULT_FQDN` | 10.0.1.10 | 10.0.1.11 | 10.0.1.12 |
-| `VAULT_SAN_IP` | 10.0.1.10 | 10.0.1.11 | 10.0.1.12 |
+
+| 变量                     | 节点 1            | 节点 2            | 节点 3            |
+| ---------------------- | --------------- | --------------- | --------------- |
+| `VAULT_CONTAINER_NAME` | vault-ha-1      | vault-ha-2      | vault-ha-3      |
+| `VAULT_DATA_VOLUME`    | vault-ha-data-1 | vault-ha-data-2 | vault-ha-data-3 |
+| `VAULT_NODE_ID`        | vault-1         | vault-2         | vault-3         |
+| `VAULT_FQDN`           | 10.0.1.10       | 10.0.1.11       | 10.0.1.12       |
+| `VAULT_SAN_IP`         | 10.0.1.10       | 10.0.1.11       | 10.0.1.12       |
+
 
 以下变量在 **所有节点相同**：
 
@@ -500,6 +520,64 @@ Root Token: hvs.xxxxxxxxxxxxx
 ./setup-ha.sh status
 ```
 
+### 第九步：签发应用 token（任意节点）
+
+应用接入**不要用 root token**。用下面的命令生成一个只能访问 crypto 插件 API 的最小权限 token（纯 HTTP API，无需 vault CLI；写请求会自动转发给 leader，任一已解封节点执行均可）：
+
+```bash
+./setup-ha.sh gen-app-token
+# 按提示输入 root token（或先 export VAULT_TOKEN=<root>）
+```
+
+它会：
+
+1. 写入策略 `crypto-app`，**精确覆盖插件的全部 API、不多一条**（挂载路径取 `.env` 的 `PLUGIN_MOUNT_PATH`，默认 `crypto`）：
+
+   | 策略路径 | capabilities | 对应 API |
+   | --- | --- | --- |
+   | `crypto/keys` | create, update | `POST /v1/crypto/keys` 创建 keypair |
+   | `crypto/keys/` | list | `LIST /v1/crypto/keys` 列出全部 external_id |
+   | `crypto/keys/+` | read | `GET /v1/crypto/keys/:external_id` 读 key 信息（公钥等） |
+   | `crypto/keys/+/sign` | create, update | `POST /v1/crypto/keys/:external_id/sign` 签名 |
+   | `crypto/tx/build/evm` | create, update | `POST /v1/crypto/tx/build/evm` 构建 EVM 交易签名载荷 |
+   | `auth/token/lookup-self` / `renew-self` | read / update | token 自查与续期（token 关闭了 `default` 策略，须显式授予） |
+
+   > 两个细节：`+` 只匹配**单个路径段**，而 `external_id` 的合法字符不含 `/`，所以通配不会越界；LIST 请求做 ACL 检查时路径**带尾部斜杠**，所以 `crypto/keys/`（list）和 `crypto/keys`（create）是两条独立规则，缺一不可。
+
+2. 创建绑定该策略的 **periodic**（`period=720h`）**orphan** token（`no_default_policy`），打印并保存到 `app.token`（权限 600，已在 `.gitignore` 排除）。
+
+应用侧用法（地址走 NLB 域名或任一节点，客户端信任集群 `ca.pem`）：
+
+```bash
+T=$(cat app.token)
+ADDR=https://vault.internal:8200   # 或任一节点 https://10.0.1.x:8200
+
+# 创建 keypair（curve: secp256k1 / secp256r1 / ed25519）
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
+  -d '{"curve":"secp256k1","name":"main wallet","external_id":"wallet:eth:1"}' \
+  $ADDR/v1/crypto/keys
+
+# 列出 / 读取
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" "$ADDR/v1/crypto/keys?list=true"
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" $ADDR/v1/crypto/keys/wallet:eth:1
+
+# 构建 EVM 交易 → 返回 signing_hash → 交给 sign 签名
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
+  -d '{"tx_type":"eip1559","chain_id":1,"nonce":0,"gas_limit":21000,"to":"0x...","value":"1000000000000000","max_fee_per_gas":"30000000000","max_priority_fee_per_gas":"1000000000"}' \
+  $ADDR/v1/crypto/tx/build/evm
+
+# 签名（data 为 32 字节哈希，hex）
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
+  -d '{"data":"<signing_hash>","encoding":"hex"}' \
+  $ADDR/v1/crypto/keys/wallet:eth:1/sign
+```
+
+运维要点：
+
+- **续期**：token 是 periodic（720h），每次 `renew-self` 把 TTL 重置回 720h，可无限续期。多数 Vault SDK 会自动续期；若应用不管，参照 [自动备份](#自动备份) 的 cron 方式定期 `POST /v1/auth/token/renew-self`。查看健康状态：`./setup-ha.sh token-status --app-token`
+- **插件升级新增了 API**：策略精确到路径，新端点默认不可访问。执行 `./setup-ha.sh gen-app-token --policy-only` 重写策略，**已签发的 token 立即生效**，无需换 token
+- **吊销**：token 泄露时用 root 执行 `POST /v1/auth/token/revoke`（body `{"token":"<app token>"}`），再 `gen-app-token` 重新签发
+
 ---
 
 ## 备份与恢复
@@ -560,12 +638,12 @@ Root Token: hvs.xxxxxxxxxxxxx
 它会：
 
 1. 写入策略 `raft-snapshot`——只允许读取 Raft 快照 + 查询/续期自身 token：
-   ```hcl
+  ```hcl
    path "sys/storage/raft/snapshot" { capabilities = ["read"] }
    path "auth/token/lookup-self"    { capabilities = ["read"] }
    path "auth/token/renew-self"     { capabilities = ["update"] }
-   ```
-   > `lookup-self` 和 `renew-self` **不是** ACL 豁免路径，它们的权限来自 Vault 内置的 `default` 策略。本 token 用 `no_default_policy` 关掉了 default，所以这两条必须显式授予。
+  ```
+  > `lookup-self` 和 `renew-self` **不是** ACL 豁免路径，它们的权限来自 Vault 内置的 `default` 策略。本 token 用 `no_default_policy` 关掉了 default，所以这两条必须显式授予。
 2. 创建一个绑定该策略的 **periodic**（`period=720h`）**orphan** token，并去掉默认策略；
 3. 打印 token 并写入 `backups/backup.token`（权限 `600`）。
 
@@ -675,16 +753,18 @@ BACKUP_S3_BUCKET=my-vault-backups
   Max TTL:       unlimited (no explicit max)
 ```
 
-| 字段 | 含义 |
-|------|------|
-| `TTL remaining` | 距离过期还剩多久（每次 `renew-self` 成功后重置回 `Period`） |
-| `Period` | periodic token 的续期周期，备份 token 为 `30d`（720h） |
-| `Max TTL` | `unlimited` 表示无硬性上限，可无限续期 |
-| `Renewable` | 为 `false` 时 token 到期即失效，无法延长 |
+
+| 字段              | 含义                                          |
+| --------------- | ------------------------------------------- |
+| `TTL remaining` | 距离过期还剩多久（每次 `renew-self` 成功后重置回 `Period`）   |
+| `Period`        | periodic token 的续期周期，备份 token 为 `30d`（720h） |
+| `Max TTL`       | `unlimited` 表示无硬性上限，可无限续期                   |
+| `Renewable`     | 为 `false` 时 token 到期即失效，无法延长                |
+
 
 命令会在异常时给出 `[WARN]` 提示，最需要留意这条：
 
-- **`TTL is below half the period`** —— 说明 cron 里的续期一直在失败。去 `logs/backup.log` 里 grep `token renew-self failed` 确认。
+- `**TTL is below half the period**` —— 说明 cron 里的续期一直在失败。去 `logs/backup.log` 里 grep `token renew-self failed` 确认。
 
 #### HTTP 403 怎么办
 
@@ -692,7 +772,7 @@ Vault 对「token 无效」和「token 有效但无权限」返回的都是 `per
 
 **a) token 已过期 / 被吊销** —— 重新生成：`./setup-ha.sh gen-backup-token`
 
-**b) token 的策略没有 `auth/token/lookup-self` 的 read 权限** —— 这条规则是后加的，早于它签发的备份 token 会命中此情况。典型特征是 **`backup` 能跑通，但 `token-status` 报 403**。
+**b) token 的策略没有 `auth/token/lookup-self` 的 read 权限** —— 这条规则是后加的，早于它签发的备份 token 会命中此情况。典型特征是 `**backup` 能跑通，但 `token-status` 报 403**。
 
 情况 b 不需要重签 token，策略是**按名字在每次请求时解析**的，改策略即刻对已签发的 token 生效：
 
@@ -709,6 +789,7 @@ Vault 对「token 无效」和「token 有效但无权限」返回的都是 `per
 > token 只从交互式输入、`VAULT_TOKEN` 环境变量或 `backups/backup.token` 读取，**不接受命令行参数** —— 否则 token 会出现在 `ps` 输出和 shell history 里。
 
 > 若环境已安装 vault CLI，也可等价手动创建（策略同上三条）：
+>
 > ```bash
 > vault policy write raft-snapshot - <<'EOF'
 > path "sys/storage/raft/snapshot" { capabilities = ["read"] }
@@ -740,11 +821,11 @@ Vault 对「token 无效」和「token 有效但无权限」返回的都是 `per
 3. `prepare-config` → `start` → `vault-unseal`（awskms 模式免解封，加入后自动完成）
 4. 新节点通过 `retry_join` 自动加入集群
 5. （可选）从 Raft 中移除旧节点：
-   ```bash
+  ```bash
    VAULT_TOKEN=hvs.xxx curl --cacert tls/ca.pem -X POST \
      -d '{"server_id":"old-vault-id"}' \
      https://leader:8200/v1/sys/storage/raft/remove-peer
-   ```
+  ```
 
 ### 查看审计日志
 
@@ -756,14 +837,16 @@ docker compose -f docker-compose.ha.yml logs -f
 
 ## 故障转移
 
-| 场景 | 影响 | 恢复方式 |
-|------|------|---------|
-| 1 节点宕机 | 集群正常运行（2/3 quorum） | 重启节点 + 解封 |
-| 2 节点宕机 | 集群不可用（丢失 quorum） | 恢复至少 1 个节点 + 解封 |
-| 3 节点全部宕机 | 集群不可用 | 逐个重启 + 解封 |
-| 3 台服务器**永久损毁** | 数据仅存于快照 | 见 [灾难恢复](#灾难恢复) |
-| Leader 宕机 | 自动选举新 Leader（几秒） | 透明切换 |
-| 网络分区 | 多数侧正常，少数侧只读 | 恢复网络 |
+
+| 场景             | 影响                 | 恢复方式            |
+| -------------- | ------------------ | --------------- |
+| 1 节点宕机         | 集群正常运行（2/3 quorum） | 重启节点 + 解封       |
+| 2 节点宕机         | 集群不可用（丢失 quorum）   | 恢复至少 1 个节点 + 解封 |
+| 3 节点全部宕机       | 集群不可用              | 逐个重启 + 解封       |
+| 3 台服务器**永久损毁** | 数据仅存于快照            | 见 [灾难恢复](#灾难恢复) |
+| Leader 宕机      | 自动选举新 Leader（几秒）   | 透明切换            |
+| 网络分区           | 多数侧正常，少数侧只读        | 恢复网络            |
+
 
 **最低存活节点数：2（3 节点集群）**
 
@@ -781,11 +864,13 @@ docker compose -f docker-compose.ha.yml logs -f
 
 快照里的数据是用**旧集群的 master key** 加密的，而 master key 由 seal 保护——seal 的信任根在谁手里，恢复就取决于谁。前提是你同时持有以下三样：
 
-| # | 需要什么 | Shamir 模式 | awskms 模式 |
-|---|---------|------------|-------------|
-| 1 | **快照文件** `.snap` | **必须在三台机器之外**（如 S3）；丢失 = 数据全部丢失 | 同左 |
-| 2 | **能解开快照的 seal** | 旧集群的 **unseal keys**（`vault-init-keys.json`，分发给不同管理员） | 加密快照的那把 **KMS key 仍存在且启用**，且新机器的 IAM 身份对它有 `kms:Encrypt/Decrypt/DescribeKey` |
-| 3 | **恢复后的管理权限** | 旧集群的 **root token** | 旧集群的 **root token**；若丢失，可用旧集群的 **recovery keys** 走 generate-root 重新生成 |
+
+| #   | 需要什么             | Shamir 模式                                             | awskms 模式                                                                    |
+| --- | ---------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1   | **快照文件** `.snap` | **必须在三台机器之外**（如 S3）；丢失 = 数据全部丢失                       | 同左                                                                           |
+| 2   | **能解开快照的 seal**  | 旧集群的 **unseal keys**（`vault-init-keys.json`，分发给不同管理员） | 加密快照的那把 **KMS key 仍存在且启用**，且新机器的 IAM 身份对它有 `kms:Encrypt/Decrypt/DescribeKey` |
+| 3   | **恢复后的管理权限**     | 旧集群的 **root token**                                   | 旧集群的 **root token**；若丢失，可用旧集群的 **recovery keys** 走 generate-root 重新生成        |
+
 
 第 2 条是**硬约束**，丢了快照就是无法解密的砖，**无任何补救手段**。Vault 源码 `vault/raft.go` 的 `raftSnapshotRestoreCallback` 对两种 seal 的分野：
 
@@ -967,7 +1052,7 @@ VAULT_TOKEN=<临时 root token> \
 - [ ] 使用正式 CA 证书（非自签名）用于生产
 - [ ] 初始化完成后撤销 Root Token：`vault token revoke <root-token>`
 - [ ] Unseal keys（Shamir）/ recovery keys（awskms）分发给不同管理员，物理隔离保管
-- [ ] 配置 Vault 策略（最小权限）
+- [ ] 应用与备份使用最小权限专用 token（[gen-app-token](#第九步签发应用-token任意节点) / gen-backup-token），绝不把 root token 交给应用
 - [ ] 启用审计日志
 - [ ] 防火墙仅开放 8200/8201 给必要来源
 - [ ] 服务器间使用内网通信
