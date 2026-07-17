@@ -24,18 +24,140 @@ make build-all   # 多平台交叉编译（-linux-amd64 / -linux-arm64 / -darwin
 make build-local # 当前平台（本地调试用）
 ```
 
-构建后把二进制复制到对应部署目录的 `plugins/`：
+构建后按交付方式把产物复制到对应的 `plugins/` 目录：
 
 ```bash
-cp build/vault-plugin-crypto-v0.2.0 deploy/plugins/      # 单机部署
-cp build/vault-plugin-crypto-v0.2.0 deploy_ha/plugins/   # HA 3 节点部署
+cp build/vault-plugin-crypto-v0.2.0{,.sha256} plugins/   # 交付外部 Vault 团队（二进制 + 校验值，见下节）
+cp build/vault-plugin-crypto-v0.2.0 deploy/plugins/      # 自部署：单机
+cp build/vault-plugin-crypto-v0.2.0 deploy_ha/plugins/   # 自部署：HA 3 节点
 ```
 
-两个 `plugins/` 目录都被 git 跟踪：提交二进制后，部署机 `git pull` 即完成分发（HA 集群三台节点都要有同一份二进制）。
+根目录 `plugins/` 是唯一入库的二进制目录：提交后，交付对象或部署机 `git pull` 即拿到同一份二进制与校验值。`deploy*/plugins/` 仅部署时临时放置，不入库（HA 集群三台节点都要有同一份二进制）。
+
+## 插件交付与接入（外部 Vault 团队）
+
+当前交付模式：我们只交付插件二进制，不部署 Vault。对方团队在已有的 Vault 上注册并挂载插件，创建最小权限 policy 后发放应用 token 给我们，我们拿 token 直接调用 [API](#api-参考)。
+
+交付物为 `plugins/` 目录下两个文件，对方收到后先校验完整性：
+
+```bash
+shasum -a 256 vault-plugin-crypto-v0.2.0
+# 输出必须与 vault-plugin-crypto-v0.2.0.sha256 文件内容一致
+```
+
+### 加载插件（Vault 团队操作）
+
+```bash
+# 1. Copy the binary into Vault's configured plugin_directory
+#    (every node in an HA cluster), then make it executable
+chmod +x <plugin_directory>/vault-plugin-crypto-v0.2.0
+
+# 2. Register the plugin (sha256 = content of the .sha256 file)
+curl -X POST -H "X-Vault-Token: $ADMIN_TOKEN" \
+  -d '{"sha256":"<sha256>","command":"vault-plugin-crypto-v0.2.0","version":"v0.2.0"}' \
+  $VAULT_ADDR/v1/sys/plugins/catalog/secret/vault-plugin-crypto
+
+# 3. Mount at crypto/
+#    (CLI equivalent: vault secrets enable -path=crypto vault-plugin-crypto)
+curl -X POST -H "X-Vault-Token: $ADMIN_TOKEN" \
+  -d '{"type":"vault-plugin-crypto","plugin_version":"v0.2.0"}' \
+  $VAULT_ADDR/v1/sys/mounts/crypto
+```
+
+### 最小权限 Policy：`crypto-app`
+
+policy 名称约定为 **`crypto-app`**，只覆盖插件的 4 个 API 端点加 token 自管理，不含任何其他 Vault 路径。挂载路径不是 `crypto/` 时替换下面的路径前缀：
+
+```hcl
+# Create keys
+path "crypto/keys" {
+  capabilities = ["create", "update"]
+}
+
+# List keys (Vault ACL-checks LIST against the trailing-slash path)
+path "crypto/keys/" {
+  capabilities = ["list"]
+}
+
+# Read key info ("+" matches exactly one path segment, i.e. one external_id)
+path "crypto/keys/+" {
+  capabilities = ["read"]
+}
+
+# Sign
+path "crypto/keys/+/sign" {
+  capabilities = ["create", "update"]
+}
+
+# Build EVM transaction payloads
+path "crypto/tx/build/evm" {
+  capabilities = ["create", "update"]
+}
+
+# Token self-management: required because the app token is issued with
+# no_default_policy (these paths are normally granted by "default")
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
+```
+
+写入 policy 并发放应用 token（Vault 团队操作）：
+
+```bash
+# Write the policy (CLI equivalent: vault policy write crypto-app crypto-app.hcl)
+jq -n --rawfile p crypto-app.hcl '{policy:$p}' | curl -X PUT \
+  -H "X-Vault-Token: $ADMIN_TOKEN" -d @- \
+  $VAULT_ADDR/v1/sys/policies/acl/crypto-app
+
+# Issue the app token: orphan + 720h periodic + no default policy
+curl -X POST -H "X-Vault-Token: $ADMIN_TOKEN" \
+  -d '{"policies":["crypto-app"],"period":"720h","no_parent":true,"no_default_policy":true,"display_name":"crypto-app"}' \
+  $VAULT_ADDR/v1/auth/token/create
+```
+
+响应中 `auth.client_token` 即交付给应用方的 token。周期 token 需在每个 period 内调用一次 `POST /v1/auth/token/renew-self` 续期（多数 Vault SDK 自动处理），否则到期失效。
+
+### 验证插件加载成功
+
+**Vault 团队侧**（管理员 token）：
+
+```bash
+# 1. Registered in the catalog: data.sha256 / data.version must match the delivered files
+curl -H "X-Vault-Token: $ADMIN_TOKEN" \
+  $VAULT_ADDR/v1/sys/plugins/catalog/secret/vault-plugin-crypto
+
+# 2. Mounted and running the right version: expect "plugin_version": "v0.2.0"
+curl -H "X-Vault-Token: $ADMIN_TOKEN" \
+  $VAULT_ADDR/v1/sys/mounts/crypto/tune
+```
+
+**应用侧**（拿到 app token 后）：
+
+```bash
+# 1. Token self-check: policies should be ["crypto-app"], ttl > 0
+curl -H "X-Vault-Token: $APP_TOKEN" $VAULT_ADDR/v1/auth/token/lookup-self
+
+# 2. Hit the plugin: list keys
+curl -X LIST -H "X-Vault-Token: $APP_TOKEN" $VAULT_ADDR/v1/crypto/keys
+```
+
+列出密钥的结果判读：
+
+| 返回 | 含义 |
+| --- | --- |
+| `200` 且带 `data.keys` | 插件正常，已有密钥 |
+| `404` 且 `errors` 为空数组 | 插件正常，只是还没有密钥（Vault 对空 LIST 的固定返回） |
+| `404` 且 `errors` 含 `no handler for route` | 插件未挂载或挂载路径不对 |
+| `403 permission denied` | token / policy 配置有问题 |
+
+最后可做一次完整冒烟：创建一个测试密钥 → 读取 → 签名。注意**密钥不可删除**，测试密钥的 `external_id` 建议带可识别前缀（如 `smoketest-20260717`）。
 
 ## 部署与升级
 
-具体部署、运维、升级步骤不在本 README 展开，见各部署目录内的完整文档：
+当前交付模式下我们不自行部署 Vault（见上节）。以下文档仅在自行部署时使用，具体部署、运维、升级步骤不在本 README 展开：
 
 | 场景 | 文档 |
 | --- | --- |
@@ -161,7 +283,7 @@ curl -X POST \
 - SealWrap 为密钥材料提供额外的加密层
 - 签名操作后清除内存
 - **密钥不可删除**，以确保安全性和审计合规性
-- 所有操作都需要有效的 Vault 认证；应用接入使用最小权限 token（见部署文档的 `gen-app-token`）
+- 所有操作都需要有效的 Vault 认证；应用接入使用最小权限 token（见上文 `crypto-app` policy；自部署场景可用部署文档的 `gen-app-token` 生成）
 
 ## 开发
 

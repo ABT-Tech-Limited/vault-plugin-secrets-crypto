@@ -7,9 +7,6 @@ dist/
 *.dylib
 
 # Plugin binary and checksum (with version, e.g., vault-plugin-crypto-v0.1.0)
-vault-plugin-crypto.sha256
-vault-plugin-crypto-*
-vault-plugin-crypto-*.sha256
 
 # Go
 *.test
@@ -76,9 +73,3 @@ deploy_ha/vault-init-keys.json
 deploy_ha/app.token
 
 .claude
-
-# Track the deploy plugin binaries (committed so `git pull` deploys them)
-!deploy/plugins/
-!deploy/plugins/**
-!deploy_ha/plugins/
-!deploy_ha/plugins/**
