@@ -23,7 +23,7 @@ services:
       # TLS certificates
       - ./tls:/vault/tls
       # Plugin binaries (read-only)
-      - ../build:/vault/plugins:ro
+      - ./plugins:/vault/plugins:ro
       # Audit logs
       - ./logs:/vault/logs
     # Chown bind-mounted dirs (data, tls) that the default entrypoint does not handle,

@@ -77,6 +77,8 @@ deploy_ha/app.token
 
 .claude
 
-# Track the HA plugin binary (committed so `git pull` deploys it to nodes)
+# Track the deploy plugin binaries (committed so `git pull` deploys them)
+!deploy/plugins/
+!deploy/plugins/**
 !deploy_ha/plugins/
 !deploy_ha/plugins/**

@@ -410,19 +410,20 @@ cmd_install_deps() {
 
 cmd_init_dirs() {
   info "Creating directory structure..."
-  mkdir -p config tls data logs backups
+  mkdir -p config tls data logs backups plugins
   chmod 700 config tls data
 
   # Check plugin binary
   local plugin_binary="${PLUGIN_NAME:-vault-plugin-crypto}-${PLUGIN_VERSION:-v0.2.0}"
-  if [ ! -f "../build/${plugin_binary}" ]; then
-    warn "Plugin binary not found: ../build/${plugin_binary}"
-    warn "Run 'make build' in the project root first."
+  if [ ! -f "plugins/${plugin_binary}" ]; then
+    warn "Plugin binary not found: plugins/${plugin_binary}"
+    warn "Build it in the project root and copy it here:"
+    warn "  make build && cp build/${plugin_binary} deploy/plugins/"
   else
-    ok "Plugin binary found: ../build/${plugin_binary}"
+    ok "Plugin binary found: plugins/${plugin_binary}"
   fi
 
-  ok "Directories created: config/ tls/ data/ logs/ backups/"
+  ok "Directories created: config/ tls/ data/ logs/ backups/ plugins/"
 }
 
 cmd_gen_tls() {
@@ -692,7 +693,7 @@ cmd_register_plugin() {
   # Calculate SHA256
   info "Calculating plugin SHA256..."
   local sha256
-  sha256=$(shasum -a 256 "../build/${plugin_binary}" | cut -d ' ' -f1)
+  sha256=$(shasum -a 256 "plugins/${plugin_binary}" | cut -d ' ' -f1)
   info "SHA256: ${sha256}"
 
   # Register plugin
