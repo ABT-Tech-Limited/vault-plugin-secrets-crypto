@@ -472,39 +472,53 @@ vault secrets list -detailed
 
 日志文件位于容器内 `/vault/logs/audit.log`，通过 Docker Volume 持久化到宿主机 `logs/` 目录。
 
-### crypto-admin 策略与 Token
+### 应用 token（crypto-app 策略）
 
-部署完成后，脚本自动创建 `crypto-admin` 策略和对应的 Orphan Token：
+应用接入**不要用 root token**。部署脚本自动创建 `crypto-app` 策略和对应的应用 token（`./setup.sh all` 已包含；单独执行或重签用 `./setup.sh gen-app-token`）。
+
+策略**精确覆盖插件的全部 API、不多一条**（挂载路径取 `.env` 的 `PLUGIN_MOUNT_PATH`，默认 `crypto`）：
 
 ```hcl
-# crypto-admin 策略
-path "crypto/*" {
-  capabilities = ["create", "read", "update", "list"]
-}
+path "crypto/keys"         { capabilities = ["create", "update"] }  # POST 创建 keypair
+path "crypto/keys/"        { capabilities = ["list"] }              # LIST 列出 external_id
+path "crypto/keys/+"       { capabilities = ["read"] }              # GET 读 key 信息（公钥等）
+path "crypto/keys/+/sign"  { capabilities = ["create", "update"] }  # POST 签名
+path "crypto/tx/build/evm" { capabilities = ["create", "update"] }  # POST 构建 EVM 交易
+
+# token 关闭了 default 策略（no_default_policy），自查/续期须显式授予
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
 ```
 
-Token 保存在 `crypto-admin-token` 文件（权限 600），使用方式：
+> 两个 ACL 细节：`+` 只匹配**单个路径段**，而 `external_id` 的合法字符不含 `/`，通配不会越界；LIST 请求做 ACL 检查时路径**带尾部斜杠**，所以 `crypto/keys/`（list）和 `crypto/keys`（create）是两条独立规则，缺一不可。
+
+Token 属性：**periodic（720h）+ orphan + no_default_policy**——续期无上限、不随 root token 吊销而失效、除上述路径外无任何权限。保存在 `app.token`（权限 600，已在 `.gitignore` 排除），使用方式：
 
 ```bash
-# 读取 admin token
-export VAULT_TOKEN=$(cat crypto-admin-token)
+T=$(cat app.token)
 
-# 使用 admin token 操作插件
-vault write crypto/keys curve=secp256k1 name=my-key
-vault list crypto/keys
+# 创建 keypair（curve: secp256k1 / secp256r1 / ed25519）
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
+  -d '{"curve":"secp256k1","name":"main wallet","external_id":"wallet:eth:1"}' \
+  https://127.0.0.1:8200/v1/crypto/keys
+
+# 签名（data 为 32 字节哈希，hex）
+curl --cacert tls/ca.pem -H "X-Vault-Token: $T" -X POST \
+  -d '{"data":"<hex>","encoding":"hex"}' \
+  https://127.0.0.1:8200/v1/crypto/keys/wallet:eth:1/sign
 ```
 
-单独创建 admin token：
+运维要点：
 
-```bash
-./setup.sh create-admin
-```
+- **续期**：每次 `POST /v1/auth/token/renew-self`（用 token 自己发起）把 TTL 重置回 720h；30 天内一次未续则过期作废。多数 Vault SDK 会自动续期。查看健康状态：`./setup.sh token-status --app-token`（TTL 低于 period 一半会告警）
+- **插件升级新增了 API**：策略精确到路径，新端点默认不可访问。执行 `./setup.sh gen-app-token --policy-only` 重写策略，**已签发的 token 立即生效**，无需换 token
+- **从旧 crypto-admin 迁移**：`create-admin` 已废弃（现为 `gen-app-token` 的别名）——旧 `crypto/*` 通配策略会自动放行插件将来新增的任何端点。旧 token 仍然有效；建议应用改用 `app.token` 后吊销旧 token：`POST /v1/auth/token/revoke`（body `{"token":"<旧 token>"}`）
 
 > **安全建议：**
 >
-> - `crypto-admin-token` 是 Orphan Token（不依赖 Root Token 生命周期），生产环境应安全存储后从服务器删除
+> - `app.token` 生产环境应交给应用的密钥管理（环境变量 / secret manager）后从服务器删除
 > - Root Token 仅用于初始化配置，完成后应撤销：`vault token revoke <root-token>`
-> - 根据实际需求创建更细粒度的策略（如 `crypto-readonly`、`crypto-signer`），参考[附录](#vault-策略示例)
+> - 需要更细粒度（只读、只签名）的策略，参考[附录](#vault-策略示例)
 
 ---
 
@@ -610,7 +624,7 @@ make deploy-restore SNAPSHOT=backups/vault-backup-20250215_120000.snap
 - 启用 TLS（禁止生产环境使用 HTTP）
 - 使用 TLS 1.2+，禁用弱密码套件
 - 初始化完成后撤销 Root Token：`vault token revoke <root-token>`
-- 配置 Vault 策略（最小权限）— `./setup.sh all` 自动创建 `crypto-admin` 策略
+- 应用使用最小权限专用 token — `./setup.sh all` 自动创建 `crypto-app` 策略与 `app.token`（见[应用 token](#应用-tokencrypto-app-策略)），绝不把 root token 交给应用
 - 启用审计日志 — `./setup.sh all` 自动启用文件审计
 - 限制网络访问（防火墙仅允许必要端口和 IP）
 - 定期轮换 TLS 证书
@@ -704,52 +718,55 @@ docker compose -f docker-compose.prod.yml logs vault | grep -i kms
 
 ### Vault 策略示例
 
-**只读策略（crypto-readonly）：**
+> 应用接入直接用内置的 `crypto-app` 策略（`./setup.sh gen-app-token`，见[应用 token](#应用-tokencrypto-app-策略)）。以下示例用于按需裁剪**更细**的权限。
+>
+> 两个 ACL 细节（写错了会莫名 403）：LIST 请求做权限检查时路径**带尾部斜杠**，所以 list 规则必须写 `crypto/keys/`；`+` 只匹配单个路径段，`external_id` 的合法字符不含 `/`，通配不会越界。
+
+**只读策略（crypto-readonly）—— 只能列出和读取 key 信息，不能建 key、不能签名：**
 
 ```hcl
-# 允许列出和读取密钥信息
-path "crypto/keys" {
+path "crypto/keys/" {
   capabilities = ["list"]
 }
-path "crypto/keys/*" {
+path "crypto/keys/+" {
   capabilities = ["read"]
 }
 ```
 
-**签名者策略（crypto-signer）：**
+**签名者策略（crypto-signer）—— 只能用已有 key 签名，不能创建新 key：**
 
 ```hcl
-path "crypto/keys" {
+path "crypto/keys/" {
   capabilities = ["list"]
 }
-path "crypto/keys/*" {
+path "crypto/keys/+" {
   capabilities = ["read"]
 }
 path "crypto/keys/+/sign" {
   capabilities = ["create", "update"]
 }
-```
-
-**管理员策略（crypto-admin）：**
-
-```hcl
-path "crypto/*" {
-  capabilities = ["create", "read", "update", "list"]
+path "crypto/tx/build/evm" {
+  capabilities = ["create", "update"]
 }
 ```
 
-应用策略：
+> 旧文档中的管理员策略 `crypto-admin`（`path "crypto/*"` 全通配）已废弃：通配会自动放行插件将来新增的任何端点，违背最小权限。完整访问用 `crypto-app`（精确枚举全部现有端点）。
+
+应用策略（需环境装有 vault CLI；纯 HTTP API 方式参考 `setup.sh` 中 `cmd_gen_app_token` 的实现）：
 
 ```bash
 # 创建策略
 vault policy write crypto-signer - <<EOF
-path "crypto/keys" { capabilities = ["list"] }
-path "crypto/keys/*" { capabilities = ["read"] }
+path "crypto/keys/" { capabilities = ["list"] }
+path "crypto/keys/+" { capabilities = ["read"] }
 path "crypto/keys/+/sign" { capabilities = ["create", "update"] }
+path "crypto/tx/build/evm" { capabilities = ["create", "update"] }
 EOF
 
-# 创建 Token
-vault token create -policy=crypto-signer -ttl=24h
+# 创建 Token（periodic + orphan；保留 default 策略以便 token 自行续期——
+# 若要像 gen-app-token 一样加 -no-default-policy，策略里须显式授予
+# auth/token/lookup-self（read）与 auth/token/renew-self（update））
+vault token create -policy=crypto-signer -period=720h -orphan
 ```
 
 ### 启用审计日志

@@ -12,9 +12,11 @@
 #   start           Start Vault container
 #   stop            Stop Vault container
 #   vault-init      Initialize Vault (first time only)
-#   vault-unseal    Unseal Vault (Shamir mode)
+#                   (shamir: unseal keys; awskms: recovery keys + auto-unseal)
+#   vault-unseal    Unseal Vault (Shamir; status check for awskms)
 #   register-plugin Register and enable the crypto plugin
-#   token-info      Show crypto-admin token details
+#   gen-app-token   Create a least-privilege app token for the crypto plugin API
+#   token-status    Show a token's TTL, policies and renewal health
 #   status          Show Vault and plugin status
 #   backup          Create a Raft snapshot backup (online, no downtime)
 #   restore         Restore Vault from a Raft snapshot
@@ -773,182 +775,282 @@ cmd_enable_audit() {
   fi
 }
 
-cmd_create_admin() {
+# Create the least-privilege application token (policy: crypto-app).
+# Replaces the old create-admin command, whose crypto-admin policy granted a
+# blanket "${mount_path}/*" -- future plugin endpoints would have been granted
+# automatically. Args: $1 = "--policy-only" or "", $2 = optional root token
+# (used by cmd_all; never passed from the CLI to keep tokens out of `ps`).
+cmd_gen_app_token() {
+  local policy_only=false
+  [ "${1:-}" = "--policy-only" ] && policy_only=true
+
   local addr
   addr="$(vault_addr)"
   local mount_path="${PLUGIN_MOUNT_PATH:-crypto}"
+  local policy_name="crypto-app"
+  local token_file="app.token"
 
-  # Skip if admin token already exists
-  if [ -f crypto-admin-token ]; then
-    warn "crypto-admin-token already exists, skipping token creation"
-    info "To recreate, delete crypto-admin-token and run: ./setup.sh create-admin"
+  if [ "$policy_only" = true ]; then
+    info "Rewriting policy '${policy_name}' only; no new token will be created."
+  elif [ -f "$token_file" ]; then
+    # Keeps `all` re-runnable without minting a new token every time.
+    warn "${token_file} already exists, skipping token creation."
+    info "To reissue:                rm ${token_file} && ./setup.sh gen-app-token"
+    info "To refresh only the policy: ./setup.sh gen-app-token --policy-only"
+    return
+  else
+    info "Generating a least-privilege application token via the Vault API (no vault CLI needed)..."
+  fi
+
+  local vault_token
+  vault_token=$(read_root_token "${2:-}")
+
+  # 1. Policy covering exactly the crypto plugin's API surface (the four
+  #    paths registered in internal/backend/backend.go), nothing else.
+  #    `+` matches a single path segment, which cannot be escaped: a valid
+  #    external_id never contains `/`. LIST requests are ACL-checked with a
+  #    trailing slash on the path, hence the separate "keys/" rule.
+  #    lookup-self/renew-self are granted by the built-in `default` policy,
+  #    which this token opts out of via no_default_policy, so they must be
+  #    granted explicitly here.
+  info "Writing policy '${policy_name}' (create/list/read keys + sign + tx build)..."
+  local policy_hcl
+  policy_hcl=$(cat <<EOF
+path "${mount_path}/keys" {
+  capabilities = ["create", "update"]
+}
+path "${mount_path}/keys/" {
+  capabilities = ["list"]
+}
+path "${mount_path}/keys/+" {
+  capabilities = ["read"]
+}
+path "${mount_path}/keys/+/sign" {
+  capabilities = ["create", "update"]
+}
+path "${mount_path}/tx/build/evm" {
+  capabilities = ["create", "update"]
+}
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
+EOF
+)
+  local policy_payload
+  policy_payload=$(printf '%s' "$policy_hcl" | python3 -c 'import json,sys; print(json.dumps({"policy": sys.stdin.read()}))')
+
+  local code
+  # curl already emits "000" via -w on connection failure; do not append another.
+  code=$(curl_vault -X PUT \
+    -H "X-Vault-Token: ${vault_token}" \
+    -d "$policy_payload" \
+    -o /dev/null -w "%{http_code}" \
+    "${addr}/v1/sys/policies/acl/${policy_name}" 2>/dev/null || true)
+  code="${code:-000}"
+  if [ "$code" != "204" ] && [ "$code" != "200" ]; then
+    error "Failed to write policy '${policy_name}' (HTTP ${code})."
+    error "The token needs permission to write sys/policies/acl (root or equivalent)."
+    exit 1
+  fi
+  ok "Policy '${policy_name}' written"
+
+  # Policies are resolved by name on every request, so after a plugin upgrade
+  # adds endpoints, rerunning with --policy-only is enough -- already-issued
+  # app tokens pick up the new rules immediately.
+  if [ "$policy_only" = true ]; then
+    echo ""
+    ok "Existing tokens bound to '${policy_name}' picked up the new rules immediately."
+    info "Verify with: ./setup.sh token-status --app-token"
     return
   fi
 
-  local vault_token
-  vault_token=$(read_root_token "${1:-}")
-
-  # Step 1: Create crypto-admin policy
-  info "Creating crypto-admin policy..."
-  local policy_json
-  policy_json=$(python3 << PYEOF
-import json
-policy = """path "${mount_path}/*" {
-  capabilities = ["create", "read", "update", "list"]
-}"""
-print(json.dumps({"policy": policy}))
-PYEOF
-)
-  local policy_result
-  policy_result=$(curl_vault -X PUT \
+  # 2. Create an orphan, periodic token bound to that policy, with no default
+  #    policy. no_parent -> survives revocation of the root token used here;
+  #    period -> renewable indefinitely, never hits a max TTL.
+  info "Creating periodic app token (period=720h, orphan, no default policy)..."
+  local create_payload
+  create_payload='{"policies":["'"${policy_name}"'"],"period":"720h","no_parent":true,"no_default_policy":true,"display_name":"crypto-app","meta":{"purpose":"application-access-to-crypto-plugin"}}'
+  local resp
+  resp=$(curl_vault -X POST \
     -H "X-Vault-Token: ${vault_token}" \
-    -d "${policy_json}" \
-    "${addr}/v1/sys/policies/acl/crypto-admin")
+    -d "$create_payload" \
+    "${addr}/v1/auth/token/create" 2>/dev/null || echo "")
 
-  if echo "$policy_result" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'errors' in d else 1)" 2>/dev/null; then
-    error "Failed to create crypto-admin policy:"
-    echo "$policy_result" | python3 -m json.tool 2>/dev/null || echo "$policy_result"
-    exit 1
-  fi
-  ok "Policy crypto-admin created"
-
-  # Step 2: Create orphan token with crypto-admin policy
-  info "Creating crypto-admin token..."
-  local token_result
-  token_result=$(curl_vault -X POST \
-    -H "X-Vault-Token: ${vault_token}" \
-    -d '{"policies":["crypto-admin"],"display_name":"crypto-admin","no_parent":true,"renewable":true,"period":"4320h","ttl":"8760h"}' \
-    "${addr}/v1/auth/token/create-orphan")
-
-  local admin_token
-  admin_token=$(echo "$token_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('client_token',''))" 2>/dev/null || echo "")
-
-  if [ -z "$admin_token" ]; then
-    error "Failed to create crypto-admin token:"
-    echo "$token_result" | python3 -m json.tool 2>/dev/null || echo "$token_result"
+  local app_token
+  app_token=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('client_token',''))" 2>/dev/null || echo "")
+  if [ -z "$app_token" ]; then
+    error "Token creation failed. Vault response:"
+    echo "$resp" | python3 -m json.tool 2>/dev/null || echo "$resp"
     exit 1
   fi
 
-  # Save token to file
-  echo "$admin_token" > crypto-admin-token
-  chmod 600 crypto-admin-token
-  ok "Token saved to crypto-admin-token"
+  # 3. Persist with tight permissions, then display.
+  ( umask 077; printf '%s' "$app_token" > "$token_file" )
+  chmod 600 "$token_file"
 
+  ok "App token created and saved to ${token_file} (mode 600)"
   echo ""
-  echo -e "${GREEN}===========================================================${NC}"
-  echo -e "${GREEN}  crypto-admin token created successfully${NC}"
-  echo -e "${GREEN}===========================================================${NC}"
-  echo -e "  Token:      ${admin_token}"
-  echo -e "  Policy:     crypto-admin (${mount_path}/* CRUD+List)"
-  echo -e "  Token file: crypto-admin-token"
+  info "Token: ${app_token}"
   echo ""
-  echo -e "  Usage:"
-  echo -e "    export VAULT_TOKEN=${admin_token}"
-  echo -e "    vault write ${mount_path}/keys curve=secp256k1 name=my-key"
-  echo -e "${GREEN}===========================================================${NC}"
+  echo -e "${YELLOW}Next steps:${NC}"
+  echo "  - Hand the token to the application (env var / secret manager). It can"
+  echo "    ONLY call the ${mount_path} plugin API: create/list/read keys, sign,"
+  echo "    and tx/build/evm -- no other Vault paths."
+  echo "  - Check its TTL:  ./setup.sh token-status --app-token"
+  echo "  - Periodic token (720h): the app (most Vault SDKs do this) or a cron"
+  echo "    must POST auth/token/renew-self before expiry."
+  echo "  - Plugin upgrade added endpoints? ./setup.sh gen-app-token --policy-only"
+  echo "  - Usage examples: see DEPLOY.md -> 应用 token"
 }
 
-cmd_token_info() {
+# Show a token's TTL, policies and renewal health via lookup-self -- no root
+# token needed, unlike the old token-info which looked tokens up with root.
+cmd_token_status() {
   local addr
   addr="$(vault_addr)"
 
-  if [ ! -f crypto-admin-token ]; then
-    error "crypto-admin-token file not found. Run: ./setup.sh create-admin"
+  # Token source: --app-token reads the saved app token, VAULT_TOKEN wins
+  # over the prompt. Never accept a token as a positional argument: it would
+  # be visible in `ps` output and land in shell history.
+  local vault_token=""
+  if [ "${1:-}" = "--app-token" ]; then
+    local token_file="app.token"
+    if [ ! -f "$token_file" ]; then
+      error "App token not found: ${token_file}"
+      error "Create one with: ./setup.sh gen-app-token"
+      exit 1
+    fi
+    vault_token=$(cat "$token_file")
+    info "Using app token from ${token_file}"
+  else
+    vault_token="${VAULT_TOKEN:-}"
+    if [ -z "$vault_token" ]; then
+      echo -n "Enter Vault token to inspect: "
+      read -r -s vault_token
+      echo ""
+    fi
+  fi
+  if [ -z "$vault_token" ]; then
+    error "No token provided."
     exit 1
   fi
 
-  local admin_token
-  admin_token=$(cat crypto-admin-token)
-
-  if [ -z "$admin_token" ]; then
-    error "crypto-admin-token file is empty"
-    exit 1
-  fi
-
-  local vault_token
-  vault_token=$(read_root_token)
-
-  info "Looking up crypto-admin token..."
-  local result
-  result=$(curl_vault -X POST \
+  # lookup-self is NOT ACL-exempt: read access comes from the built-in `default`
+  # policy. A token created with no_default_policy needs it granted explicitly.
+  local tmp http_code body
+  tmp=$(mktemp)
+  # On a connection failure curl already emits "000" via -w, so do not append
+  # another one with `|| echo 000` -- that yields the unmatchable "000\n000".
+  http_code=$(curl_vault -X GET \
     -H "X-Vault-Token: ${vault_token}" \
-    -d "{\"token\":\"${admin_token}\"}" \
-    "${addr}/v1/auth/token/lookup" 2>/dev/null)
+    -o "$tmp" -w "%{http_code}" \
+    "${addr}/v1/auth/token/lookup-self" 2>/dev/null || true)
+  http_code="${http_code:-000}"
+  body=$(cat "$tmp")
+  rm -f "$tmp"
 
-  # Check for empty response or errors
-  if [ -z "$result" ] || ! echo "$result" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-    error "Token lookup failed: empty or invalid response from Vault"
-    info "The token may have expired. Recreate with:"
-    info "  rm crypto-admin-token && ./setup.sh create-admin"
-    exit 1
-  fi
+  case "$http_code" in
+    200) ;;
+    403)
+      # Vault returns the same "permission denied" for a bad token and for a
+      # valid token lacking read on auth/token/lookup-self, so name both causes.
+      error "HTTP 403 on auth/token/lookup-self. Either:"
+      error "  a) the token is invalid, expired or revoked; or"
+      error "  b) the token's policy does not grant read on auth/token/lookup-self."
+      error "     (b) applies to tokens issued before that rule existed, e.g. an"
+      error "     old crypto-admin token from create-admin."
+      error "     Fix for app tokens without reissuing: ./setup.sh gen-app-token --policy-only"
+      exit 1
+      ;;
+    503)
+      error "Vault is sealed (HTTP 503). Unseal first: ./setup.sh vault-unseal"
+      exit 1
+      ;;
+    000)
+      error "Cannot reach Vault at ${addr}. Is the container running?"
+      exit 1
+      ;;
+    *)
+      error "Token lookup failed (HTTP ${http_code})."
+      echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"
+      exit 1
+      ;;
+  esac
 
-  local errors
-  errors=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); errs=d.get('errors',[]); print(','.join(errs)) if errs else None" 2>/dev/null || echo "")
-  if [ -n "$errors" ]; then
-    error "Token lookup failed: ${errors}"
-    info "The token may have expired. Recreate with:"
-    info "  rm crypto-admin-token && ./setup.sh create-admin"
-    exit 1
-  fi
+  echo -e "\n${YELLOW}=== Token Status ===${NC}\n"
+  printf '%s' "$body" | python3 -c '
+import sys, json
 
-  VAULT_RESULT="$result" python3 << 'PYEOF'
-import os, json
-from datetime import datetime, timezone
+d = json.load(sys.stdin).get("data", {})
 
-data = json.loads(os.environ["VAULT_RESULT"]).get("data", {})
+def human(secs):
+    if secs <= 0:
+        return "0s"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, sec = divmod(rem, 60)
+    parts = []
+    if days:  parts.append(f"{days}d")
+    if hours: parts.append(f"{hours}h")
+    if mins:  parts.append(f"{mins}m")
+    if not parts: parts.append(f"{sec}s")
+    return " ".join(parts)
 
-display_name = data.get("display_name", "N/A")
-policies = ", ".join(data.get("policies", []))
-renewable = data.get("renewable", False)
-orphan = data.get("orphan", False)
-period = data.get("period", 0)
-ttl = data.get("ttl", 0)
-creation_time = data.get("creation_time", 0)
-expire_time = data.get("expire_time", "")
+ttl        = d.get("ttl", 0)
+period     = d.get("period", 0)
+max_ttl    = d.get("explicit_max_ttl", 0)
+renewable  = d.get("renewable", False)
+expire     = d.get("expire_time")
+policies   = d.get("policies", [])
+num_uses   = d.get("num_uses", 0)
 
-# Format creation time
-try:
-    ct = datetime.fromtimestamp(int(creation_time), tz=timezone.utc)
-    creation_str = ct.strftime("%Y-%m-%d %H:%M:%S UTC")
-except:
-    creation_str = str(creation_time)
+name     = d.get("display_name") or "-"
+accessor = d.get("accessor") or "-"
+pol_str  = ", ".join(policies) if policies else "-"
+orphan   = d.get("orphan", False)
+issued   = d.get("issue_time") or "-"
 
-# Format remaining TTL
-def fmt_duration(seconds):
-    if seconds <= 0:
-        return "EXPIRED"
-    days = seconds // 86400
-    hours = (seconds % 86400) // 3600
-    if days > 0:
-        return f"{days}d {hours}h"
-    return f"{hours}h"
-
-# Format period
-def fmt_period(seconds):
-    if seconds <= 0:
-        return "N/A (not periodic)"
-    hours = seconds // 3600
-    days = hours // 24
-    if days > 0:
-        return f"{hours}h ({days}d)"
-    return f"{hours}h"
-
-expire_str = expire_time if expire_time else "N/A (periodic token)"
-
+print(f"  Display name:  {name}")
+print(f"  Accessor:      {accessor}")
+print(f"  Policies:      {pol_str}")
+print(f"  Orphan:        {orphan}")
+print(f"  Renewable:     {renewable}")
+print(f"  Issued at:     {issued}")
 print()
-print(f"\033[1;33m=== Token Info ===\033[0m")
-print()
-print(f"  Display Name:   {display_name}")
-print(f"  Policies:       {policies}")
-print(f"  Created:        {creation_str}")
-print(f"  Expire Time:    {expire_str}")
-print(f"  Remaining TTL:  {fmt_duration(ttl)}")
-print(f"  Period:         {fmt_period(period)}")
-print(f"  Renewable:      {renewable}")
-print(f"  Orphan:         {orphan}")
-print()
-PYEOF
+
+if expire is None:
+    print("  TTL:           never expires (root token or period-less service token)")
+else:
+    print(f"  TTL remaining: {human(ttl)}  ({ttl}s)")
+    print(f"  Expires at:    {expire}")
+
+if period:
+    print(f"  Period:        {human(period)}  (renew-self resets TTL back to this)")
+max_ttl_str = human(max_ttl) if max_ttl else "unlimited (no explicit max)"
+print(f"  Max TTL:       {max_ttl_str}")
+if num_uses:
+    print(f"  Uses left:     {num_uses}")
+
+warnings = []
+if expire is not None and ttl <= 0:
+    warnings.append("Token has already expired.")
+elif expire is not None and ttl < 86400:
+    warnings.append(f"Expires in under 24h ({human(ttl)}). Renew it now.")
+if period and renewable and ttl < period // 2:
+    warnings.append("TTL is below half the period - scheduled renew-self is likely failing. "
+                    "Check the renewing cron/application logs.")
+if expire is not None and not renewable:
+    warnings.append("Token is NOT renewable; it will expire and cannot be extended.")
+
+if warnings:
+    print()
+    for w in warnings:
+        print(f"  [WARN] {w}")
+'
+  echo ""
 }
 
 cmd_status() {
@@ -1144,7 +1246,7 @@ cmd_all() {
   cmd_enable_audit "$root_token"
   echo ""
 
-  cmd_create_admin "$root_token"
+  cmd_gen_app_token "" "$root_token"
   echo ""
 
   cmd_status
@@ -1164,11 +1266,15 @@ cmd_help() {
   echo "  start           Start Vault container"
   echo "  stop            Stop Vault container"
   echo "  vault-init      Initialize Vault (first time only)"
-  echo "  vault-unseal    Unseal Vault (Shamir mode)"
+  echo "                  (shamir: creates unseal keys; awskms: creates recovery"
+  echo "                   keys, Vault auto-unseals via KMS)"
+  echo "  vault-unseal    Unseal Vault (Shamir; status check for awskms)"
   echo "  register-plugin Register and enable the crypto plugin"
   echo "  enable-audit    Enable file audit logging"
-  echo "  create-admin    Create crypto-admin policy and token"
-  echo "  token-info      Show crypto-admin token details (expiry, TTL, etc.)"
+  echo "  gen-app-token   Create a least-privilege token for applications: crypto"
+  echo "                  plugin API only (create/list/read keys, sign, tx build)"
+  echo "                  (--policy-only rewrites the policy, e.g. after a plugin upgrade)"
+  echo "  token-status    Show a token's TTL and policies (--app-token reads app.token)"
   echo "  status          Show Vault and plugin status"
   echo "  backup          Create a Raft snapshot backup (online, no downtime)"
   echo "  restore         Restore Vault from a Raft snapshot"
@@ -1204,8 +1310,17 @@ case "$COMMAND" in
   vault-unseal)    cmd_vault_unseal ;;
   register-plugin) cmd_register_plugin ;;
   enable-audit)    cmd_enable_audit ;;
-  create-admin)    cmd_create_admin ;;
-  token-info)      cmd_token_info ;;
+  gen-app-token)   cmd_gen_app_token "${2:-}" ;;
+  create-admin)
+    # Deprecated alias kept for muscle memory / old runbooks.
+    warn "create-admin is deprecated; issuing a least-privilege 'crypto-app' token instead."
+    cmd_gen_app_token "${2:-}"
+    ;;
+  token-status)    cmd_token_status "${2:-}" ;;
+  token-info)
+    # Deprecated alias for token-status.
+    cmd_token_status "${2:-}"
+    ;;
   status)          cmd_status ;;
   backup)          cmd_backup ;;
   restore)         cmd_restore "$@" ;;
